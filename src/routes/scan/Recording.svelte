@@ -14,6 +14,7 @@
   let hands: { Left?: Hand; Right?: Hand } = {}
 
   let stream: MediaStream
+  let videoFileUrl: string | undefined
   let video: HTMLVideoElement
   let detector: Detector
   let container: HTMLElement, footer: HTMLElement, column: HTMLElement
@@ -33,12 +34,16 @@
     return !browser || !!window.navigator.mediaDevices?.getUserMedia
   }
 
-  function setup(video: HTMLVideoElement) {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Oof')
+  function resetStats() {
     ;(leftStat = INITIAL_STAT()), (rightStat = INITIAL_STAT())
     ;(leftJoints = undefined), (rightJoints = undefined)
     recordingStarted = true
     requestAnimationFrame(() => container.scrollIntoView({ behavior: 'smooth' }))
+  }
+
+  function setup(video: HTMLVideoElement) {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Oof')
+    resetStats()
     navigator.mediaDevices
       .getUserMedia({
         audio: false,
@@ -59,9 +64,33 @@
       })
   }
 
+  function setupFromFile(video: HTMLVideoElement, file: File) {
+    resetStats()
+    $recording = true
+    videoFileUrl = URL.createObjectURL(file)
+    video.srcObject = null
+    video.loop = true
+    video.muted = true
+    video.src = videoFileUrl
+    video.onloadedmetadata = () => {
+      video.play()
+      videoWidth = video.videoWidth
+      videoHeight = video.videoHeight
+    }
+  }
+
+  function onFileChosen(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0]
+    if (file) setupFromFile(video, file)
+  }
+
   function teardown() {
     $recording = false
     if (stream) stream.getTracks().forEach((t) => t.stop())
+    if (videoFileUrl) {
+      URL.revokeObjectURL(videoFileUrl)
+      videoFileUrl = undefined
+    }
   }
 
   onMount(async () => {
@@ -79,7 +108,7 @@
 
   onDestroy(() => {
     cancelAnimationFrame(rid)
-    stream.getTracks().forEach((t) => t.stop())
+    if (stream) stream.getTracks().forEach((t) => t.stop())
   })
 
   function download(blob: Blob, filename: string) {
@@ -153,14 +182,24 @@
         </div>
       {/if}
     {:else}
-      <button
-        class="mt-10 bg-gradient-to-br from-purple-400 to-amber-600 text-xl p-1 rounded-2 shadow-lg shadow-pink/40 transition-all hover:shadow-pink/60 hover:scale-105 hover:-translate-y-0.5"
-        on:click={() => setup(video)}
-      >
-        <span class="block bg-slate-900 px-8 py-2 rounded-1.5 text-pink-200 font-semibold">
-          Start Scan
-        </span>
-      </button>
+      <div class="mt-10 flex gap-4 justify-center flex-wrap">
+        <button
+          class="bg-gradient-to-br from-purple-400 to-amber-600 text-xl p-1 rounded-2 shadow-lg shadow-pink/40 transition-all hover:shadow-pink/60 hover:scale-105 hover:-translate-y-0.5"
+          on:click={() => setup(video)}
+        >
+          <span class="block bg-slate-900 px-8 py-2 rounded-1.5 text-pink-200 font-semibold">
+            Start Scan
+          </span>
+        </button>
+        <label
+          class="bg-gradient-to-br from-purple-400 to-amber-600 text-xl p-1 rounded-2 shadow-lg shadow-pink/40 transition-all hover:shadow-pink/60 hover:scale-105 hover:-translate-y-0.5 cursor-pointer"
+        >
+          <span class="block bg-slate-900 px-8 py-2 rounded-1.5 text-pink-200 font-semibold">
+            Scan From Video File
+          </span>
+          <input type="file" accept="video/*" class="hidden" on:change={onFileChosen} />
+        </label>
+      </div>
     {/if}
     {#if $recording}
       <div class="w-60 lg:w-80 fixed rounded border-white border-4 top-20 right-4 mx-auto">

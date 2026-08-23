@@ -7,7 +7,8 @@ import resAssetsLoader from '@mediapipe/hands/hands_solution_packed_assets_loade
 import resSimdWasm from '@mediapipe/hands/hands_solution_simd_wasm_bin.wasm?url'
 import resSimdWasmJs from '@mediapipe/hands/hands_solution_simd_wasm_bin?url'
 
-import { Hands, type InputImage } from '@mediapipe/hands'
+import * as mp from '@mediapipe/hands'
+import type { InputImage } from '@mediapipe/hands'
 import { type Hand, makeHand } from './hand'
 
 interface EstimationConfig {
@@ -19,13 +20,13 @@ interface EstimationConfig {
  * Much of the code remains unchanged.
  */
 class MediaPipeHandsMediaPipeDetector {
-  private readonly handsSolution: Hands
+  private readonly handsSolution: mp.Hands
 
   private hands: { Left?: Hand; Right?: Hand } = {}
   private selfieMode = false
 
   constructor() {
-    this.handsSolution = new Hands({
+    this.handsSolution = new mp.Hands({
       locateFile(path: string) {
         switch (path) {
           case 'hand_landmark_full.tflite':
