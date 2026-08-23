@@ -17,3 +17,4 @@ __pycache__
 *.kra
 plum-twist
 src/routes/lemon
+bun.lock
