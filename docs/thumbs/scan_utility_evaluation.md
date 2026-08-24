@@ -1,0 +1,80 @@
+# Scan utility evaluation: measuring whether hand-scan changes actually help key placement
+
+`sweep_region_preview.md` proposed a page that draws each finger's reachable region as a point cloud — a coverage picture. That turned out to be the wrong altitude for what's actually needed: a _picture_ doesn't tell you whether a change to the scan pipeline made the hand model more useful for placement, only that a shape exists. This doc replaces it with the right framing: **an evaluation harness** — a set of metrics and views, each with a defined "before/after" reading, that together answer _"is this scanned hand model getting better at supporting key placement, and by how much?"_
+
+**`sweep_region_preview.md` is effectively superseded by this doc** — its point-cloud sampling code is still useful (see "Relationship to other work" below), but as an input to the metrics here, not as a deliverable on its own.
+
+## The core principle: evaluate the hand model, not a candidate keyboard
+
+`/beta` already has a reachability overlay (`computeReachability`/`reachability`/`keyReachable` in `src/routes/beta/lib/viewers/viewer3dHelpers.ts:424-466`) that colors a _specific_ keyboard's keys by whether the scanned hand can reach them. That's a layout-_dependent_ score — it bakes in row/column count, curvature, stagger, everything about a particular design. This doc is explicitly about the opposite question: **strip away any assumption about what a keyboard looks like, and ask how good the raw kinematic material — the scanned hand — is on its own terms.** Every metric below is computed purely from `Joints`/`SolvedHand`, with no reference to any `Cuttleform` config or `c.keys`. This matters because it's the only way to separate two very different failure modes: "the scan/model is bad" vs. "this particular layout doesn't suit this hand" — conflating them (which the existing `/beta` overlay would do if reused here) makes it impossible to tell whether a scanning-pipeline change actually helped.
+
+## Two categories of question
+
+Any scan-pipeline change (per `scanning.md`: a new neutral-pose phase, real ROM elicitation, enslaving trials) can fail in two independent ways: the **measurement** could be unreliable, or the measurement could be reliable but still **kinematically uninformative** for placement. Both need their own metrics.
+
+### Category 1 — Is the measurement trustworthy?
+
+These don't require any placement reasoning at all — they're about whether the numbers coming out of the scan are stable and well-supported, which has to be true before any downstream metric means anything.
+
+- **Frame yield per phase.** What fraction of captured frames passed the existing 0.7 MediaPipe confidence threshold, per elicitation phase (once `scanning.md`'s multi-phase capture exists). Trivial to compute from data already being collected; a phase with low yield is a phase whose derived numbers (ROM, neutral pose) shouldn't be trusted yet.
+- **Axis-fit confidence, already sitting unused in the code.** `fitNorms` (`src/lib/hand.ts:215-243`) computes `const { v, q } = SVD(normvecs.map(decompose), false)` and only ever uses `v` — `q`, the singular values, is discarded. The ratio of the top two singular values is the standard way to express "how well does a single dominant axis explain this joint's observed motion" — a joint whose motion is genuinely well-described by one PCA axis will have a large ratio; a joint where the assumption is shaky (noisy tracking, or genuinely multi-axis motion being forced into a 1-DOF model) will have a ratio near 1. This is a **currently-computed-and-thrown-away** number, not new work — surfacing it costs almost nothing.
+- **Test-retest reliability across repeat scans of the same hand.** The clinical goniometry literature this project already leans on (`scanning.md`'s sources) uses the intraclass correlation coefficient (ICC) for exactly this: how consistent is a measurement across repeated trials of the same subject. ICC ≥ 0.75 is typically read as "good," ≥ 0.90 as "excellent" ([Interrater and intrarater reliability of finger goniometric measurements](https://pubmed.ncbi.nlm.nih.gov/20825126/); [AR-based finger joint ROM reliability](https://www.sciencedirect.com/science/article/pii/S0363502324005148)). Applied here: per joint, per fitted quantity (length, axis direction, eventually ROM bounds), compute variance across multiple scans of the same hand. This is directly actionable today — you already have several `/scan` captures of your own hand sitting in exported `hands.json` files; comparing joint lengths/axes across them is a real, computable test-retest reliability check right now, with zero new capture work.
+
+### Category 2 — Given trustworthy data, is the kinematic capability actually useful for placement, independent of any layout?
+
+These borrow directly from robot-manipulator workspace analysis, a mature field that answers almost exactly this question ("how good is this kinematic chain, considered on its own") for industrial arms — the finger chains modeled in `SolvedHand` are structurally the same kind of object (a short serial chain of revolute joints with fixed link lengths), so the same tools apply.
+
+- **Reachable workspace volume, per finger.** The standard approach in robotics is voxel-based: bin the sampled fingertip point cloud (from the sweep-sampling approach in the now-superseded doc) into a 3D grid, count occupied voxels, sum to an estimated volume ([Reachable Workspace — ScienceDirect Topics](https://www.sciencedirect.com/topics/engineering/reachable-workspace); workspace volume via voxel discretization and Monte Carlo sampling is standard practice for this exact problem). A single volume number per finger, tracked scan-over-scan, is the simplest possible "did the model change" signal — though note it conflates "the hand got measured more accurately" with "the hand is just bigger/more flexible," so it's a first-pass signal, not a final one.
+- **Manipulability (Yoshikawa's index), as a scalar field over the workspace.** In robotics, manipulability at a configuration `q` is `w(q) = √det(J(q)·J(q)ᵀ)` where `J` is the Jacobian (how fingertip velocity relates to joint-angle velocity) — high values mean the finger can move freely in many directions from that pose, low values mean it's near a singularity/kinematically "stuck" ([Yoshikawa's Manipulability Index — overview](https://www.emergentmind.com/topics/yoshikawa-s-manipulability-index); [Manipulator Performance Measures survey](https://link.springer.com/article/10.1007/s10846-014-0024-y)). Nothing in this codebase computes a Jacobian today, but nothing needs to be derived symbolically either — `SolvedHand.fkBy`/`worldPositions` already give position as a function of angles, so a **numerical** Jacobian (perturb one free angle by a small ε, re-run FK, take the finite-difference derivative — 3 extra `fkBy` calls per sample) is cheap to bolt onto the same sampling loop the sweep-cloud already does. The payoff: a manipulability value per sampled point tells you which parts of a finger's reach are kinematically "solid" (good candidates for precise, repeated key presses) versus marginal (near a singular pose, more sensitive to small placement/scan error) — a genuinely new signal, not obtainable from a raw point cloud or a max-reach-sphere check.
+- **Neutral-deviation cost field.** Already discussed in earlier conversation: for each sampled joint-angle combination, score by (weighted) squared deviation from the joint's neutral angle, per `problems.md` §3's minimum-jerk-grounded principle. Once real neutral-pose and ROM data exist, this becomes a genuine per-point cost; until then it's explicitly a placeholder (flat/uninformative), which is itself a useful "we don't have this yet" signal.
+- **Comfortable-vs-full ROM volume ratio**, once `scanning.md`'s two-tier ROM capture exists: what fraction of the full-ROM-sampled workspace volume falls inside the comfortable-tier bounds. A number that should visibly change (and become meaningful at all) only once tier-1/tier-2 data exists — a clean "did this specific scan phase land" check.
+- **Enslaving-discounted effective volume.** `problems.md` §3.3 already argues weaker/more-enslaved fingers (ring, pinky) have a narrower _independently controllable_ workspace than raw ROM implies. Once the `E[i][j]` coupling matrix exists (`scanning.md` §5), this is directly computable: discount each finger's raw workspace volume by (something like) `1 − mean(E[i][j] for other fingers j)`, and report raw vs. discounted volume side by side. This turns an abstract biomechanical claim into a concrete before/after number.
+- **Cross-finger workspace overlap volume.** Purely geometric, purely layout-independent: where do two adjacent fingers' raw 3D workspaces intersect? This says nothing about which finger should get which key, but it's a real property of the hand model worth surfacing on its own, independent of the enslaving-matrix's separate (angle-space) coupling signal — two fingers can have overlapping reach with no neural coupling at all, and vice versa.
+
+## Visualizations, mapped to the metrics above
+
+- **Data-completeness dashboard** (Category 1): per-joint horizontal bars — neutral tick, comfortable/full ROM shading, axis-fit-confidence as bar opacity/color, frame-yield as a small badge per phase. No FK needed; reads directly off the data structure. The fastest way to see "what's missing" as a picture.
+- **Coupling-matrix heatmap**: `E[i][j]` (or, before it exists, a placeholder all-zero grid) as a standard 2D matrix heatmap — finger × finger. Same visualization style used for confusion matrices generally; nothing hand-specific needed.
+- **Two-scan overlay/diff view**: load two `HandData` exports of the same hand side by side (or overlaid, color-coded by scan), per-joint length/axis delta annotated numerically. This is the ICC/test-retest metric made visible, and — per Category 1 above — buildable today with existing exported scans, no new capture work required.
+- **Manipulability/cost heatmap on the sampled point cloud**: reuse the point-cloud sampling from the superseded sweep-region doc, but color each point by manipulability or neutral-deviation cost instead of by finger identity alone. This is where that earlier sampling code finds its actual purpose — not as a shape to admire, but as the substrate a real metric gets painted onto.
+- **Per-finger metric scorecard, tracked across repeated scans.** A small table/bar-chart set (workspace volume, mean manipulability, comfortable-ratio, discounted-volume) computed for each `hands.json` you accumulate over time. This is the literal answer to "is the model getting better" — a short list of numbers with a trend, rather than a picture that has to be eyeballed.
+
+## What's computable today vs. blocked on `scanning.md`
+
+| Metric                                           | Needs                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| Frame yield, axis-fit confidence (SVD ratio)     | Nothing new — data already computed, just unused                                            |
+| Test-retest reliability / two-scan diff          | Nothing new — usable today with your existing multiple `/scan` captures                     |
+| Reachable workspace volume, cross-finger overlap | Nothing new — same sampling as the (superseded) sweep-region doc                            |
+| Manipulability field                             | Nothing new — numerical Jacobian via finite differences on existing `fkBy`/`worldPositions` |
+| Neutral-deviation cost field                     | Blocked on real neutral-pose + ROM data (`scanning.md` §2–4)                                |
+| Comfortable-vs-full ROM ratio                    | Blocked on `scanning.md` §4's two-tier capture                                              |
+| Enslaving-discounted volume, coupling heatmap    | Blocked on `scanning.md` §5's paired drag/block trials                                      |
+
+Notably, more than half the list needs **no new scan-pipeline work** — it's computable against data you already have. That's a strong argument for building the evaluation harness itself before waiting on any of `pre-development-work.md`'s sequencing, since several of its numbers will already be meaningful.
+
+## Relationship to other work
+
+- **Supersedes `sweep_region_preview.md`** as the goal, but its sampling approach (grid/Sobol sampling over free joint angles via `fkBy`/`worldPositions`, per the earlier design discussion) is exactly the substrate this doc's workspace-volume, manipulability, and cost metrics need — so that file's technical content isn't wasted, it's just repositioned as an internal building block rather than the deliverable. Worth deciding explicitly whether to delete `sweep_region_preview.md` outright or fold its sampling description into this doc's own implementation notes.
+- **Deliberately does not reuse** `/beta`'s existing `keyReachable`/`computeReachability` (`viewer3dHelpers.ts:424-466`) — that machinery answers a different, layout-dependent question and mixing it in here would undermine the "independent of any keyboard's preconceived shape" goal this doc is built around.
+- **Feeds forward into**, but is not the same project as, `pre-development-work.md`'s constraint-based placement UI (§3) — that UI answers "where should keys go, given this hand and this candidate layout"; this evaluation harness answers "is the hand model itself good enough to trust for that question yet." The placement UI should treat a healthy scorecard from this doc as a rough precondition, not the other way around.
+
+## Suggested sequencing
+
+1. **Data-completeness dashboard + axis-fit confidence.** Cheapest possible thing, needs no sampling, surfaces the already-computed-but-discarded SVD ratio. Good first PR-sized slice.
+2. **Two-scan diff/reliability view**, using your existing exported scans — no new capture work, and it's the most directly actionable "is the underlying measurement trustworthy" answer available right now.
+3. **Workspace volume + cross-finger overlap**, reusing the sampling approach from the superseded sweep-region doc as internal plumbing (no longer a standalone page).
+4. **Manipulability field**, added to the same sampling loop via numerical Jacobian — cheap once (3) exists.
+5. **Neutral-deviation cost, comfortable-ratio, enslaving-discounted volume** — build the code path now (so it's ready), but treat its output as explicitly placeholder/uninformative until the corresponding `scanning.md` capture phases land.
+
+## Sources
+
+- [Yoshikawa's Manipulability Index — overview](https://www.emergentmind.com/topics/yoshikawa-s-manipulability-index)
+- [Manipulator Performance Measures: A Comprehensive Literature Survey — Journal of Intelligent & Robotic Systems](https://link.springer.com/article/10.1007/s10846-014-0024-y)
+- [Reachable Workspace — ScienceDirect Topics](https://www.sciencedirect.com/topics/engineering/reachable-workspace)
+- [Reachability and Dexterity: Analysis and Applications for Space Robotics — DLR](https://elib.dlr.de/97212/1/Astra-PUBLISHED.pdf)
+- [Interrater and intrarater reliability of finger goniometric measurements — PubMed](https://pubmed.ncbi.nlm.nih.gov/20825126/)
+- [Augmented Reality-Based Finger Joint Range of Motion Measurement: Reliability and Concurrent Validity — ScienceDirect](https://www.sciencedirect.com/science/article/pii/S0363502324005148)
+- [Intra- and inter-rater reliability of goniometric finger range of motion using a written protocol — Archives of Physiotherapy](https://www.archivesofphysiotherapy.com/index.php/aop/article/view/3049) (already cited in `scanning.md`)
+
+See also `docs/thumbs/problems.md` (§3, joint-cost minimization and enslaving-based volume discounting) and `docs/thumbs/scanning.md` (§2–5, the capture phases several Category-2 metrics are blocked on).
