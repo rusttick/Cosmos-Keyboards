@@ -93,11 +93,11 @@ This is the one exception to the one-hand-at-a-time rule (see "What this doc sup
 
 ### Phase 4 — Braced abduction, single active tier
 
-- **Position:** palm down, flat on the desk. Four digits maintain **light** contact with the desk (just enough to prevent them dragging along with the target finger — not pressed hard; hard pressing invokes the passive-splay mechanism described in the scope section above and must be avoided throughout, not varied for tiering). One digit at a time is the active/target finger, in digit order.
-- **Instruction, per finger:** "press your other four fingers down gently, and move [finger] back and forth: press down, lift in an arc, swing over to the other side, press down again — like reaching between two keys on a row. Keep it light and comfortable, not forced."
-- **Captured:** per-frame abduction angle (MCP-Y) for the target finger throughout the press-lift-arc-press cycles. Press-contact instants (near-zero velocity, fingertip near desk height) are a naturally self-marking segmentation cue — cleaner than a freeform held-window, since the desk contact itself verifies the finger was momentarily stationary.
-- **Calculated:** abduction angle sampled at each press-contact instant; min/max across cycles = **active abduction ROM**, single tier (no comfortable/full split — see scope section above for why).
-- **Completion criteria (plateau detection):** same pattern as Phase 3's full-ROM tier — min/max stop growing across the last 2 press cycles.
+- **Position:** palm down, flat on the desk. Four digits maintain **light** contact with the desk (just enough to prevent them dragging along with the target finger — not pressed hard; hard pressing invokes the passive-splay mechanism described in the scope section above and must be avoided throughout, not varied for tiering). One digit at a time is the active/target finger, in digit order, and stays clear of the desk for its entire motion — the same passive-splay mechanism that rules out a hard-press tier also rules out letting the moving finger touch down, so there's no contact event to build a completion signal around.
+- **Instruction, per finger:** "press your other four fingers down gently, and wiggle [finger] side to side, through as much of its comfortable range as you can, a few times — like reaching between two keys on a row. Keep it light and comfortable, not forced, and don't press or touch anything with the moving finger."
+- **Captured:** per-frame abduction angle (MCP-Y) for the target finger, continuously, throughout the wiggle cycles.
+- **Calculated:** running min/max abduction angle across the continuous stream; min/max across cycles = **active abduction ROM**, single tier (no comfortable/full split — see scope section above for why).
+- **Completion criteria (plateau detection):** same pattern as Phase 3's full-ROM tier — min/max stop growing across the last 2 wiggle cycles.
 - **Retry:** plateau not reached within the requested cycle count → more cycles requested.
 
 ### Phase 5 — Paired free-motion sweep (enslaving + blocking, unified)
@@ -148,7 +148,7 @@ Two reusable patterns cover every phase above; a developer implementing `/scan3`
 
 1. **Plateau detection** (Phase 3's full tier, Phase 4, Phase 6a): track a running extremum (min/max angle) across repeated cycles; declare convergence once the last _k_ cycles each fail to extend the extremum by more than a small threshold. Used whenever the target quantity is a single scalar bound approached asymptotically through repetition. Phase 6a adds a false-plateau guard on top of this base pattern (confidence/yield must stay healthy through the apparent extreme, not just the angle plateauing) — worth considering for any other phase where occlusion risk is non-trivial, not just the thumb.
 2. **Coverage-grid detection** (Phase 5, Phase 6b): bin a 2D (or higher, or named-region rather than strictly gridded) space into cells; declare convergence once a minimum fraction of cells has been visited with confidence-passing data. Used whenever the target quantity is a _region_, not a single bound, and exhaustive duration isn't itself the goal — even coverage across the space is. Phase 6b's retry logic extends this pattern with re-orientation as an explicit escalation step when coverage stalls, distinguishing "hasn't tried yet" from "camera can't see this from here."
-3. **Still-window detection** (Phase 2, Phase 3's comfortable tier, Phase 4's press-contact instants): a shared low-variance-window extraction, either via velocity-thresholding over a freeform hold or via a self-marking physical event (desk contact) — prefer the latter wherever a natural physical event is available, since it's a more reliable segmentation cue than inferring stillness from noisy motion data.
+3. **Still-window detection** (Phase 2, Phase 3's comfortable tier): a shared low-variance-window extraction via velocity-thresholding over a freeform hold.
 
 Every phase's segment additionally fails, independent of its specific criterion, if accepted-frame yield (post confidence-filtering) is too low — this is the one universal retry trigger layered under all three patterns.
 
