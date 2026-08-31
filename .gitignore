@@ -18,3 +18,4 @@ __pycache__
 plum-twist
 src/routes/lemon
 bun.lock
+scan_tests/data/

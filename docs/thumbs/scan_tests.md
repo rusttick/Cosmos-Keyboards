@@ -10,7 +10,9 @@ Hold one hand still, palm facing the camera, for 15–30 seconds. Compute bone l
 
 ## Palmar vs. dorsal vs. lateral, same static hold
 
-Repeat the static hold in all three orientations (palm-facing, dorsal-facing, and the lateral palms-facing-each-other-style view) and compare. This directly checks the premise the whole protocol rewrite rests on — the documented MediaPipe world-landmark collapse in dorsal view — against this project's own camera setup, hand, and lighting, rather than trusting a GitHub issue filed against someone else's setup. Still just static holds; only the number of orientations changes.
+Repeat the static hold across orientations and compare: `palm-facing`, `palm-away` (dorsal), and the two lateral rolls into the palms-facing-each-other posture, `thumb-away` (thumb up/away from the camera, pinky toward it — the tenting-consistent default) and `thumb-toward` (the opposite roll — `scan_procedure.md` never pins down which edge faces the camera, so both are captured rather than assuming one). This directly checks the premise the whole protocol rewrite rests on — the documented MediaPipe world-landmark collapse away from a direct palm-facing view — against this project's own camera setup, hand, and lighting, rather than trusting a GitHub issue filed against someone else's setup. Still just static holds; only the orientation changes.
+
+A relaxed, fingers-together hold in either lateral orientation is expected to be geometrically harder than `palm-away`: the side-by-side finger spread visible face-on in `palm-facing` rotates toward the camera's line of sight as the hand rolls, so fingers increasingly overlap from the camera's view. `scan_procedure.md` only proposes this orientation for the **abduction** capture, where fingers are actively spread apart rather than held together — so a low-noise result here isn't guaranteed. Treat lateral's numbers as a real, open question this test is meant to answer, not an assumed failure.
 
 ## Bone-length agreement between the two canonical (palmar, lateral) orientations
 
@@ -70,56 +72,24 @@ Before trusting any pooled or fitted quantity elsewhere in the protocol, it's wo
 
 ### Where the code lives
 
-**Capture page:** `src/routes/scan-tests/static-hold/+page.svelte`, a new, minimal SvelteKit route (it has to live under `src/routes/` for the dev server to serve it at all). It reuses the existing MediaPipe wiring rather than reimplementing it:
+**Capture page:** `src/routes/scan-tests/static-hold/+page.svelte`, a minimal SvelteKit route under `src/routes/` (required for the dev server to serve it at all). It drives MediaPipe through `src/routes/scan-tests/lib/detector.ts`, a detector built on `$lib/hand.ts` — the canonical FK/IK engine `/beta`, `handoptim.ts`, and the planned `/scan3` route all read from (see `scan3.md`'s "Foundation" section) — rather than `src/routes/scan/lib/hand.ts`, an older fork kept only for `/scan`'s own components. This keeps scan-tests and the eventual `/scan3` implementation computing bone vectors and joint angles the same way.
 
-- Import the default export from `src/routes/scan/lib/detector.ts` the same way `src/routes/scan/+page.svelte` already does, for `estimateHands()`.
-- Reuse whatever camera/`getUserMedia`/`<video>` setup that same page already has — this test needs no new camera-handling code, just a stripped-down page around the existing pattern.
-- UI needed: a dropdown or three buttons to label which orientation is being recorded (`palm-facing`, `dorsal-facing`, `lateral`) — even though this first test only uses `palm-facing`, the next test in this doc reuses the same page for the other two, so building the label in now avoids rebuilding the page later — a countdown/duration display, a start/stop control, and a status line showing frames captured and current confidence score.
-- On start, run a `requestAnimationFrame` (or fixed-interval) loop calling `estimateHands()` against the video element for a fixed duration (default 20 seconds), pushing one record per frame into an in-memory array. Only record if a hand of the expected handedness is present in that frame; still record its confidence score even if below the 0.7 threshold — filtering happens later, in analysis, not during capture, so the raw file always has the full picture.
-- On stop (or duration elapsed), serialize the captured array plus a small metadata block to JSON and trigger a browser download via `new Blob([...], { type: 'application/json' })` and a temporary `<a download>` — this runs in the actual dev-server page in a real browser tab, not inside any sandboxed preview, so a normal file download works exactly as it would for any other page.
+- Camera/`getUserMedia`/`<video>` setup follows the same pattern `/scan` already uses.
+- A dropdown selects the target orientation: `palm-facing`, `palm-away` (dorsal), `thumb-away`, `thumb-toward` (the two lateral rolls).
+- **Positioning auto-detects the target orientation; there's no manual record button.** MediaPipe's hand tracker bootstraps via a full-frame palm detector, then tracks frame-to-frame off the previous frame's region rather than re-running full detection every frame — so starting cold in a hard pose (e.g. rolled so fingers stack toward the camera) often never gets an initial lock, while starting from an easy pose and rotating into a harder one, already tracked, usually works. The page runs two phases accordingly:
+  1. **Positioning** — starts immediately on "Start," in whatever pose you're in. Every frame's palm-normal angle relative to the camera's forward axis is computed from `Hand.vectors` (the raw, camera-relative landmark positions `makeHand()` returns before its basis-standardizing transform): `cross(indexMcp - wrist, pinkyMcp - wrist)`, normalized, with Right-hand normals negated to match Left's convention (mirrored chirality flips the cross product's sign). ~0° is palm-facing, ~180° is palm-away, ~90° is either lateral roll. Since both lateral rolls read the same palm angle, `thumbDepthSign()` provides a second signal — comparing the thumb's and pinky's raw camera-space depth relative to the wrist, whichever is closer to the camera determines the roll — and the page displays it live during positioning so its sign convention can be checked against an actual hold rather than trusted blindly. Once the angle (and, for lateral targets, the depth sign) matches the target orientation continuously for 0.5s, positioning ends and recording begins automatically.
+  2. **Recording** — runs for the configured hold duration, accumulating live per-bone and per-joint statistics (below) from every accepted frame.
+- **No file save, no separate analysis script.** The page computes bone-length and joint-angle statistics incrementally, in the browser, from the same `makeHand()`/`CONNECTIONS` math driving live detection, and displays them next to the video feed as they accumulate — there's no download step and no offline script to run for this test. `scan_tests/analyze-static-hold.ts` and any files under `scan_tests/data/` are kept only as an archival record of sessions run before this live workflow existed; they're not part of the current spec.
 
-**Where the downloaded file goes:** the browser will drop it in the user's normal downloads folder; move it into a new `scan_tests/data/static-hold/` directory at the repo root (create it if it doesn't exist). This directory holds raw per-frame capture data, which is exactly the kind of thing that shouldn't be committed — add `scan_tests/data/` to `.gitignore`. Name the file descriptively and consistently, e.g. `palm-facing_2026-08-30T14-05-00.json` (orientation, then a filesystem-safe ISO-8601-ish timestamp) — the analysis script doesn't require a specific name, but consistent naming makes it easy to glob later when comparing multiple captures.
+### Live noise statistics
 
-**Analysis script:** `scan_tests/analyze-static-hold.ts`, a plain Bun script (not a SvelteKit route, not a `bun:test` test file — this is a one-off analysis tool, not part of the app or its CI-facing test suite) living in a new top-level `scan_tests/` directory, parallel to `src/`, `docs/`, and `target/`, since it's neither app code nor a build-time asset generator (`src/model_gen/`'s existing convention is specifically for producing `target/` artifacts, which this isn't). Run it with:
+Per accepted frame (`score >= 0.7`, matching the product's existing confidence threshold) during the recording phase:
 
-```bash
-bun run scan_tests/analyze-static-hold.ts scan_tests/data/static-hold/palm-facing_2026-08-30T14-05-00.json
-```
-
-It imports `makeHand` from `src/lib/hand.ts` directly (a plain TypeScript module with no DOM dependency, safe to import from a Bun script) to reconstruct each frame's bone `vectors` from the raw landmarks, exactly the way the product code does — this matters because it means the analysis is checking the same derived quantities the real pipeline would compute, not a reimplementation that could disagree with it for unrelated reasons.
-
-### Data format
-
-The downloaded JSON file:
-
-```ts
-interface StaticHoldCapture {
-  meta: {
-    capturedAt: string // ISO 8601
-    orientation: 'palm-facing' | 'dorsal-facing' | 'lateral'
-    handedness: 'Left' | 'Right'
-    notes?: string // free text, e.g. camera model, lighting, distance
-  }
-  frames: Array<{
-    t: number // seconds since recording start
-    score: number // MediaPipe's own per-frame handedness/detection confidence
-    keypoints: { x: number; y: number; z: number }[] // 21 entries, MediaPipe's `keypoints` (2D + relative depth), unmodified
-    keypoints3D: { x: number; y: number; z: number }[] // 21 entries, MediaPipe's `keypoints3D` world landmarks, unmodified
-  }>
-}
-```
-
-`keypoints`/`keypoints3D` are stored exactly as MediaPipe's own `NormalizedLandmarkList`/`LandmarkList` shapes (array of `{x,y,z}`), specifically so a frame can be fed straight into `makeHand({ keypoints, keypoints3D, score, handedness })` in the analysis script without any reshaping — the capture page should not pre-compute bone vectors or lengths itself; keep the raw file as close to MediaPipe's own output as possible so nothing about how "bone length" gets derived is baked in before analysis time.
-
-### What the analysis script computes
-
-For each frame with `score >= 0.7` (matching the product's existing confidence threshold — frames below it are dropped, exactly as they would be in real capture, so the noise-floor number reflects what the real pipeline would actually see):
-
-1. Call `makeHand(...)` to get that frame's `vectors` (one `Vector3` per bone, per `CONNECTIONS`' 20 bone segments across the 5 fingers).
+1. `makeHand(...)` gives that frame's `limbs` (one `Vector3` per bone, per `CONNECTIONS`' 20 bone segments across the 5 fingers) — the same derived quantity the real pipeline computes, not a reimplementation that could disagree with it for unrelated reasons.
 2. Bone length per segment = `vector.length()`.
-3. An inter-bone angle per joint (MCP/PIP/DIP-equivalent) = the angle between consecutive bone vectors in the same finger's chain, via three.js's `vectorA.angleTo(vectorB)`, converted to degrees. This doesn't need to match the product's full FK/axis-decomposition machinery for this first pass — a simple consistent relative measure is enough to characterize frame-to-frame jitter.
+3. An inter-bone angle per joint (MCP/PIP/DIP-equivalent) = the angle between consecutive bone vectors in the same finger's chain, via three.js's `vectorA.angleTo(vectorB)`, converted to degrees.
 
-Then, across all accepted frames: per bone segment, the mean length, standard deviation, and coefficient of variation (`stdev / mean`, as a percentage); per joint, the mean angle and standard deviation in degrees. Print this as a plain table to stdout (20 bone rows, ~15 joint-angle rows), and also write a small `<input-file>.summary.json` alongside the input file with the same numbers in structured form, so later tests (which repeat this same analysis under different orientations or on different people) can be diffed against each other programmatically instead of by eye.
+Each bone segment and joint has a running mean/variance accumulator (Welford's online algorithm — O(1) memory per accumulator, no need to retain every frame), updated on every accepted frame. The displayed table refreshes every 10 accepted frames rather than every single one, to avoid needless re-renders. The table shows the same numbers the old offline script printed — per-bone mean length, stdev, and CV%; per-joint mean angle and stdev in degrees — plus an aggregate mean-CV / mean-stdev headline for at-a-glance monitoring while the hold is in progress. Verified to match the old script's output bit-for-bit when replayed against the same captured frames.
 
 ### How to interpret the result
 
