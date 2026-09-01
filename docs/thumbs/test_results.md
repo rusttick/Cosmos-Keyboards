@@ -148,3 +148,95 @@ First live run: normal MediaPipe frame noise registered as ~5 reps in 15 frames 
 Live retest at 15° hysteresis / 2° convergence threshold: 3 stable reps, correctly converged. No further tuning needed — unlike Test 6, the first raised default worked on the first real try.
 
 This closes Test 7. Both completion detectors (`stillWindow.ts`, `plateau.ts`) are now validated against real capture, not just synthetic data, with real tuned parameters instead of guessed ones. Three separate instances now, across this whole testing effort (Test 3's thumb bias, Test 6's velocity threshold, Test 7's peak hysteresis), of the same underlying lesson: parameters guessed from first principles or literature undershoot real MediaPipe noise by a wide margin, consistently in the same direction (too tight/too strict), and only live tuning against real capture catches it.
+
+---
+
+## 2026-09-01 — Plan for the remaining algorithms/tests (8–12), three groups
+
+Reviewed what's left (Tests 8–12; 13/14 stay deferred per their own doc text) and grouped by dependency and reuse opportunity, cheapest/lowest-risk first:
+
+**Group 1 — DIP/PIP coupling fit (Test 8).** No new capture needed: `flexion-sweep` already retains full per-frame data per angle bin, so the fit (slope/intercept/R²/residuals between PIP and DIP angle) can run directly against existing captures. Lives at `src/routes/scan3/lib/phases/flexion.ts`. Tested by extending `flexion-sweep`'s UI, not a new page.
+
+**Group 2 — Enslaving coefficient + coverage-grid completion (Tests 9, 12).** Grouped together because they're the fit-and-its-completion-detector pair for the same new capture mode: a freeform _paired_-finger sweep (two fingers tracked simultaneously, which no existing tool does). Completes the "completion detectors" trio `scan3.md` names alongside `stillWindow.ts`/`plateau.ts`. Lives at `src/routes/scan3/lib/phases/pairedSweep.ts` and `.../completion/coverageGrid.ts`. Needs one new capture page (reusing the existing detector/overlay/throttled-loop scaffolding, just a new capture surface). Test 12's actual grid-resolution _tuning_ stays optional/deferred per `scan_tests.md`'s own text — only the algorithm itself (needed for the enslaving fit's completion signal) is in scope now.
+
+**Group 3 — Thumb CMC axis fit + occlusion guard, and thumb freeform trajectory vs. isolated baseline (Tests 10, 11).** Saved for last on purpose: these are the most complex (Test 10's occlusion guard has to distinguish "truncated by occlusion" from "genuinely plateaued," a harder discrimination than anything built so far) and the most exposed to a risk already confirmed twice over (Tests 3 and 4: thumb tracking is disproportionately noisy and biased off `palm-facing`). Better to have Groups 1–2's fitting/completion patterns solid, and the "every guessed threshold has undershot real noise" lesson fully absorbed, before tuning thumb-specific guard logic. Lives at `src/routes/scan3/lib/phases/thumbCmc.ts`, reusing the axis-fit-confidence work from Test 4.
+
+Order: 1 → 2 → 3. Not started yet.
+
+---
+
+## 2026-09-01 — Group 1 implemented: DIP/PIP coupling fit (Test 8)
+
+`src/routes/scan3/lib/phases/flexion.ts` written at its `scan3.md`-specified location: `fitDipPipCoupling(history: Hand[], finger: Finger)` reads PIP (`limbs[1].angleTo(limbs[2])`) and DIP (`limbs[2].angleTo(limbs[3])`) per frame — the same convention `flexion-sweep`'s live ROM table already uses at `j=1`/`j=2` — and fits an ordinary-least-squares line (`dip ≈ slope*pip + intercept`) plus R² and per-frame residuals, matching `scan3.md`'s `DipPipCoupling` shape. A degenerate all-flat sweep (no PIP variation) falls back to slope 0 instead of dividing by zero.
+
+Verified against synthetic data (`flexion.test.ts`, `bun test`) before touching real capture, continuing this doc's established pattern: an exact linear relationship recovers slope/intercept exactly with R²=1; a quadratic relationship (`dip = 0.4*pip + 0.01*pip²`) correctly produces a lower R² and residuals that grow toward the ROM extremes rather than staying flat — confirming the residual-vs-extremes check this test is actually looking for would show up if present.
+
+Per Group 1's plan, no new capture page: `flexion-sweep/+page.svelte` was extended to call `fitDipPipCoupling` over every accepted frame pooled across all palm-angle bins (this question is about the finger's full sweep, not about camera orientation, unlike the axis-confidence/ROM table that stays bin-by-bin) every `STATS_UPDATE_EVERY` frames and again on stop. Displays slope/intercept/R² plus a residual table bucketed into 8 equal-width PIP-angle ranges (mean |residual| per bucket) — a flat trend across buckets means the linear fit holds throughout the sweep; residuals growing in the first/last buckets means the coupling curves near the ROM extremes, the thing `scan_tests.md`'s spec for this test says to look for.
+
+### First live runs: 11 reps across all 5 fingers, both hands (1 session each; index has 3 reps, 2 Right + 1 Left)
+
+| finger | hand | R²    | slope | intercept | frames |
+| ------ | ---- | ----- | ----- | --------- | ------ |
+| index  | L    | 0.285 | 0.435 | 30.76°    | 868    |
+| index  | R    | 0.013 | 0.035 | 35.09°    | 1021   |
+| index  | R    | 0.111 | 0.138 | 34.29°    | 968    |
+| middle | R    | 0.658 | 0.390 | -4.47°    | 970    |
+| middle | L    | 0.388 | 0.196 | 6.57°     | 831    |
+| ring   | R    | 0.616 | 0.289 | 3.24°     | 984    |
+| ring   | L    | 0.183 | 0.094 | 6.93°     | 923    |
+| pinky  | R    | 0.773 | 0.923 | 0.07°     | 843    |
+| pinky  | L    | 0.726 | 1.034 | 11.25°    | 920    |
+| thumb  | R    | 0.535 | 1.007 | 8.81°     | 954    |
+| thumb  | L    | 0.692 | 1.372 | 4.72°     | 802    |
+
+**Coupling strength varies a lot by finger, not just by noise.** Pinky is the strongest and most consistent (R² 0.73–0.77 both hands, slope near 1 — DIP tracks PIP almost 1:1). Index is by far the weakest and most inconsistent (R² 0.01–0.29 across 3 reps, slope far below 1 in two of three reps) — DIP barely moves with PIP at all in most index reps, the clearest evidence yet that the linear-coupling assumption doesn't hold uniformly across fingers. Middle and ring sit in between, each with a real-looking Right > Left gap (middle: 0.658 vs 0.388; ring: 0.616 vs 0.183) — the same Left/Right asymmetry theme Test 4 flagged for ROM, unconfirmed here too with only n=1 per side per finger.
+
+**Thumb caveat:** the tool's generic "PIP"/"DIP" labels (limb-chain positions 1↔2 and 2↔3) land on the thumb's **MCP and IP** joints, not true PIP/DIP, since the thumb has one fewer non-metacarpal bone than the other fingers — the same convention `flexion-sweep`'s ROM table already uses for thumb. Not a bug, but the thumb rows above answer "does MCP couple to IP," a different, unplanned-for question from Group 3's dedicated thumb CMC work.
+
+**Residuals mostly grow toward full flexion, not symmetrically at both extremes** — in middle-R, ring-R/L, pinky-R, and thumb-R, the worst-fitting bucket is consistently the highest-PIP one, not the lowest. This is a more specific (and different) shape than `scan_tests.md`'s original framing ("curve near the ROM extremes," implying both ends) anticipated — so far it looks closer to "breaks down specifically near full flexion." Pinky-L is the one outlier: residuals stay large through most of the range rather than concentrating at either end.
+
+**Known limitation, carried over from Test 3's design (`scan_tests.md`'s own spec for this test):** per-bucket frame counts are uneven (pinky-L's worst bucket has only 11 frames) and consecutive video frames of continuous motion aren't independent samples, so residual magnitudes in sparsely-populated buckets are less trustworthy than densely-populated ones — a bucket's number should be read alongside its frame count, not on its own.
+
+### Still open
+
+- Single session per finger/hand (index has 2 reps on the Right) — not enough to confirm the middle/ring Left-Right asymmetry or the near-full-flexion residual-growth pattern are real rather than single-session artifacts.
+- Whether index's near-zero coupling replicates, and if so, whether it's a real biomechanical property (independent DIP control) or a tracking artifact specific to how MediaPipe resolves the index finger's DIP landmark — not disambiguated here.
+- Not yet clear whether the linear model is "good enough" for `scan_procedure.md`'s purposes at any of these R² values, since no threshold was set in advance (consistent with how Test 1 was scoped) — that's a product judgment call, not something this test alone resolves.
+
+### Second batch: 15 more reps (index L×3/R×2, middle L×2/R×2, ring L×2, thumb L×2/R×2)
+
+Running totals now: index L=4/R=4, middle L=3/R=3, ring L=3/R=1 (unchanged — none submitted), pinky L=1/R=1 (unchanged), thumb L=3/R=3.
+
+**Index's near-zero coupling replicates cleanly.** All 4 Left reps (0.285, 0.180, 0.045, 0.066) and all 4 Right reps (0.013, 0.111, 0.002, 0.098) stay in a 0.00–0.29 band — consistently the lowest-R² finger of the five, on both hands. This is no longer a single-rep fluke; index's DIP genuinely doesn't track PIP linearly on this rig.
+
+**Middle's Right>Left asymmetry holds up at n=3 per side, though the gap narrowed.** Left: 0.388, 0.334, 0.663 (mean ≈0.46). Right: 0.658, 0.806, 0.854 (mean ≈0.77). The ranges barely overlap (Left's best rep, 0.663, is about equal to Right's worst, 0.658) — real difference, smaller than the original single-rep comparison suggested but still a consistent direction across all 3 reps each side.
+
+**Thumb turned out consistent both hands, not asymmetric.** Left: 0.692, 0.563, 0.728 (mean ≈0.66). Right: 0.535, 0.543, 0.609 (mean ≈0.56). Overlapping ranges, no clear hand effect — thumb's MCP/IP coupling (see labeling caveat above) sits moderately-high on both hands, unlike middle/ring.
+
+**Ring's asymmetry is still unconfirmed — no new Right-hand ring reps came in this batch.** The 2 new Left reps (0.236, 0.254) landed close to the original Left rep (0.183), tightening that side's range to 0.18–0.25 — but Right still has only the original single rep (0.616), so the apparent gap is exactly as unconfirmed as before.
+
+**The "residuals grow near full flexion" pattern does not replicate universally — it's finger-specific, not general.** It held clearly for 3 of 4 new thumb reps and one of the two new index-Right reps (worst bucket at the high-PIP end). It did **not** hold for either new ring-Left rep (residuals flat-to-decreasing toward the high end in both) or for one of the two new middle-Left reps (worst bucket was the _first_ one, not the last). Revising the earlier note: this looks like a real pattern for thumb specifically, occasionally for index, but not a property of DIP/PIP coupling in general — ring in particular trends the opposite way.
+
+**Pinky got no new reps this batch** — still n=1 per hand, its Left-side residual-growth-through-the-whole-range outlier is still unconfirmed.
+
+### Third batch: 7 more reps (ring R×3, pinky L×2, pinky R×2) — closes out every remaining open item
+
+**Ring's asymmetry is now decisively confirmed.** Right jumps from n=1 to n=4: 0.616, 0.787, 0.848, 0.806 (range 0.62–0.85, mean ≈0.76). Left stays at 0.183, 0.236, 0.254 (range 0.18–0.25, mean ≈0.22, n=3). The two hands' ranges don't overlap at all — this is the clearest Left/Right split of any finger tested, well past the point of single-rep coincidence.
+
+**Pinky is consistent both hands, and the earlier Left-side residual outlier does not replicate.** Left: 0.726, 0.811, 0.768 (n=3, tight range). Right: 0.773, 0.683, 0.719 (n=3, tight range). No real hand asymmetry. The original Left rep's 16.04°-residual spike in its last bucket (only 11 frames) doesn't show up in either new Left rep — both stay in a flat 6.5–12° band throughout the PIP range, no dramatic tail spike. That original number now reads as a sparse-bucket artifact (the same caveat this test's own spec already carries: a bucket with few frames is an unreliable residual estimate), not a real finding — the pinky-Left "outlier" is retracted.
+
+**New, unflagged observation (not chased further here, just noted):** pinky-Right's two new reps both show residuals climbing sharply toward higher PIP (rep 2 peaks at 16.56° in the 48-58° bucket; rep 3 climbs steadily to 14.26° by the 79-89° bucket), while pinky-Left's reps stay flat throughout. This is a hand-specific residual-growth difference for pinky specifically — the opposite of what the original "does the growth-near-extremes pattern replicate" question was asking, and outside Group 1's original scope. Worth a look if pinky's coupling model gets built out further, not blocking anything right now.
+
+### Group 1 (Test 8) data collection: complete
+
+Every open item from the previous two batches is now resolved:
+
+| Finger | Asymmetry?                                                         | Confidence                 |
+| ------ | ------------------------------------------------------------------ | -------------------------- |
+| index  | none — uniformly low both hands (0.00–0.29)                        | high, n=4/side             |
+| middle | real, Right > Left (≈0.77 vs ≈0.46)                                | high, n=3/side             |
+| ring   | real, Right > Left (≈0.76 vs ≈0.22) — largest gap of any finger    | high, n=4 Right / n=3 Left |
+| pinky  | none — consistent both hands (≈0.7–0.8)                            | high, n=3/side             |
+| thumb  | none — consistent both hands (≈0.56–0.66), MCP/IP not true PIP/DIP | high, n=3/side             |
+
+No further reps needed to answer Test 8's original question set. Remaining open threads are secondary and don't block moving to Group 2: (1) whether index's near-zero coupling is a real biomechanical property or a MediaPipe DIP-landmark tracking artifact — needs a different kind of test than more reps of this one; (2) the newly-noticed pinky Right-vs-Left residual-growth-shape difference; (3) the general "is this R² good enough for scan_procedure.md" product judgment call, not something this test resolves on its own.

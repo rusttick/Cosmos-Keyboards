@@ -11,6 +11,7 @@
     type Joint,
     objectFromFingers,
   } from '$lib/hand'
+  import { type DipPipFit, fitDipPipCoupling } from '../../scan3/lib/phases/flexion'
 
   type Phase = 'idle' | 'recording'
 
@@ -69,6 +70,50 @@
   let totalAcceptedFrames = 0
 
   let bins: Bin[] = Array.from({ length: BIN_COUNT }, (_, i) => makeBin(i))
+  let dipPipFit: DipPipFit | undefined
+
+  interface ResidualBucket {
+    pipLo: number
+    pipHi: number
+    count: number
+    meanAbsResidual: number
+  }
+
+  /** Buckets samples by PIP angle into equal-width ranges and averages |residual| within each, so a
+   * systematic curve near the ROM extremes (Test 8, scan_tests.md) shows up as a trend across
+   * buckets rather than needing to eyeball hundreds of individual points. */
+  function residualBuckets(fit: DipPipFit, bucketCount = 8): ResidualBucket[] {
+    if (fit.samples.length === 0) return []
+    const pips = fit.samples.map((s) => s.pip)
+    const lo = Math.min(...pips)
+    const hi = Math.max(...pips)
+    const width = (hi - lo) / bucketCount || 1
+
+    const buckets: { sum: number; count: number }[] = Array.from({ length: bucketCount }, () => ({
+      sum: 0,
+      count: 0,
+    }))
+    for (const s of fit.samples) {
+      const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor((s.pip - lo) / width)))
+      buckets[idx].sum += Math.abs(s.residual)
+      buckets[idx].count++
+    }
+
+    return buckets.map((b, i) => ({
+      pipLo: lo + i * width,
+      pipHi: lo + (i + 1) * width,
+      count: b.count,
+      meanAbsResidual: b.count === 0 ? NaN : b.sum / b.count,
+    }))
+  }
+
+  /** Pools every accepted frame across all palm-angle bins — unlike axis-fit confidence and ROM
+   * (which are compared bin-by-bin against palm angle), the DIP/PIP coupling question is about the
+   * finger's full-tier sweep as a whole, not about camera orientation. */
+  function refitDipPip() {
+    const allFrames = bins.flatMap((b) => b.history)
+    dipPipFit = allFrames.length >= 2 ? fitDipPipCoupling(allFrames, finger) : undefined
+  }
 
   $: noHandDetected =
     phase !== 'idle' && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
@@ -115,6 +160,7 @@
   async function start() {
     error = undefined
     bins = Array.from({ length: BIN_COUNT }, (_, i) => makeBin(i))
+    dipPipFit = undefined
     totalAcceptedFrames = 0
     currentScore = undefined
     lastFrameAt = undefined
@@ -188,7 +234,10 @@
           bins = bins
 
           totalAcceptedFrames++
-          if (totalAcceptedFrames % STATS_UPDATE_EVERY === 0) refitAll()
+          if (totalAcceptedFrames % STATS_UPDATE_EVERY === 0) {
+            refitAll()
+            refitDipPip()
+          }
         }
       })
       .catch((e) => console.error(e))
@@ -208,6 +257,7 @@
     cancelAnimationFrame(rid)
     teardownCamera()
     refitAll()
+    refitDipPip()
   }
 
   onDestroy(() => {
@@ -356,6 +406,46 @@
                       : `${bin.romMin[j].toFixed(1)} to ${bin.romMax[j].toFixed(1)}`}
                   </td>
                 {/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {/if}
+
+  {#if dipPipFit}
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold mb-2">
+        {finger}, {handedness} — DIP/PIP coupling (Test 8, pooled across all bins, {dipPipFit.samples
+          .length}
+        frames)
+      </h2>
+      <p class="text-sm mb-2">
+        dip ≈ {dipPipFit.slope.toFixed(3)} × pip + {dipPipFit.intercept.toFixed(2)}°, R² = {dipPipFit.r2.toFixed(
+          3
+        )}
+      </p>
+      <p class="text-xs text-gray-400 mb-2">
+        Mean |residual| by PIP-angle range — a flat row-to-row trend means the linear fit holds
+        throughout; residuals growing toward the first/last rows means the coupling curves near the ROM
+        extremes.
+      </p>
+      <div class="overflow-x-auto">
+        <table class="text-xs text-left w-full">
+          <thead class="text-gray-400">
+            <tr>
+              <th class="pr-4">PIP range</th>
+              <th class="pr-4">Frames</th>
+              <th>Mean |residual|</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each residualBuckets(dipPipFit) as bucket}
+              <tr>
+                <td class="pr-4">{bucket.pipLo.toFixed(0)}-{bucket.pipHi.toFixed(0)}°</td>
+                <td class="pr-4">{bucket.count}</td>
+                <td>{bucket.count === 0 ? '—' : bucket.meanAbsResidual.toFixed(2) + '°'}</td>
               </tr>
             {/each}
           </tbody>
