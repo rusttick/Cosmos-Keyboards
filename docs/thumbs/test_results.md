@@ -72,3 +72,79 @@ Non-thumb fingers also show real disagreement (several bones in the 5–12% rang
 
 - Only one `palm-facing`/`thumb-away` pair per hand so far — worth at least one more rep per hand to confirm the thumb bias magnitude and direction hold up, and to get a clearer read on whether the smaller non-thumb differences are real or borderline.
 - Not yet determined whether this is specific to `thumb-away`'s roll or would show up in `palm-away` too (Test 2 only measured _noise_, not _mean_ bone length, for `palm-away` vs. `palm-facing`) — worth a same-style proportion comparison there for a complete picture.
+
+---
+
+## 2026-08-31 — Test 4 implemented: axis-fit confidence, `palm-facing` vs. `thumb-away`
+
+### Building it
+
+Added `src/routes/scan-tests/flexion-sweep/+page.svelte`: same auto-detect-orientation/throttled-detection framework as `static-hold`, but instructs a flex/extend sweep of a chosen finger instead of a static hold, and compares axis-fit confidence and ROM between two back-to-back captures for the same finger/hand. The orientation math (`palmAngleDeg`, `thumbDepthSign`, `inTargetRange`) and the keypoint overlay drawing were factored out of `static-hold` into shared modules (`src/routes/scan-tests/lib/orientation.ts`, `.../overlay.ts`) so both pages read from one calibrated source rather than risking the two drifting apart.
+
+`fitNorms` (`src/lib/hand.ts`) already ran an SVD per joint and only used the resulting basis, discarding the singular values — `scan_utility_evaluation.md` had flagged this as a free signal worth surfacing. It now also returns `axisConfidence` (ratio of the top two singular values), added as an optional field on `Joint` so no existing consumer (`/scan`, `/scan2`, `calculateJoints` itself) is affected.
+
+### A structural finding, caught before shipping the UI
+
+Tested the new confidence field against synthetic per-finger motion with independently-varying noise on each bone, expecting three different per-joint confidence numbers. Got the same number three times, every time. Traced it to how `calculateJoints` actually works: a finger's three non-metacarpal joint fits (deg2/deg3/deg4) all run their SVD over the _same pooled_ bone1+bone2+bone3 vector set — each fit only changes the coordinate frame it's expressed in, carried forward from the previous stage's result — and SVD singular values don't change under rotation. So the "per-joint" confidence this method produces was never actually three independent measurements; it's the same number, viewed three times. This is a real, previously-invisible property of the existing canonical fitting code (not something introduced by this test), only noticed because surfacing the discarded `q` value made it checkable. The flexion-sweep UI shows one confidence number per finger per capture instead of a misleading three-row table.
+
+### First real runs: index finger, 6 reps (3 Right, 4 Left — one Left rep counted in both the confidence and ROM tallies below)
+
+**Confidence shows no consistent effect.** Across 6 palm-facing/thumb-away pairs, the winner flips rep to rep (B−A: −0.11, +0.07, +0.19, −0.06, +0.19, −0.07 — mean +0.035, essentially zero) and the between-rep spread within a single orientation (A: 1.36–1.69, B: 1.43–1.85) is larger than the between-orientation gap in any individual rep. Confidence itself sat low in both orientations throughout (1.3–1.9, versus ~3.5 for a clean synthetic single-axis rotation) — real index-finger flexion apparently isn't clean single-axis motion regardless of camera angle, which may be why this metric doesn't discriminate well between orientations at all.
+
+**ROM showed a striking pattern in 4 Left-hand reps that didn't replicate in 2 Right-hand reps.** Joints 2 and 3 (more distal, closer to where fingers self-occlude in the lateral roll) were wider in `thumb-away` than `palm-facing` in all 4 Left-hand reps (joint 2: ~40% wider; joint 3: ~2x wider), while joint 1 (proximal) showed no difference — consistent with the occlusion-glitch theory (min/max is maximally sensitive to rare bad frames; a proximal joint that stays visible throughout wouldn't show it, distal joints that go in and out of occlusion would). But the 2 Right-hand reps didn't show the same pattern — one had joint 3 narrower in `thumb-away`, the other had joint 2 narrower. Unconfirmed: real Left/Right asymmetry (different camera angle relative to that hand?) vs. a 4-for-4 streak that happened by chance with only 6 total reps.
+
+### Redesigned: continuous angle-binned sweep instead of two discrete captures
+
+The two-discrete-capture design (separate `palm-facing` and `thumb-away` runs, each requiring the auto-detect-and-dwell positioning gate) was replaced with a single continuous session: rotate slowly from `palm-facing` (0°) to full lateral (~90°) while continuously flexing, with accepted frames binned live into 10° palm-angle windows (9 bins), each independently refit for axis-fit confidence and ROM. Two reasons: the discrete-capture ceremony made collecting the reps above slower than it needed to be, and — more importantly — the two-endpoint comparison was throwing away the 30°–60°/whatever-transition-zone data entirely, which is exactly where the interesting question ("where does tracking break down") actually lives. A continuous binned sweep answers that directly instead of inferring it from contrasting two endpoints.
+
+Binning/refit mechanics verified against synthetic data (frames sort into ascending angle bins as rotation increases; each populated bin fits without error).
+
+### Continuous sweep runs: index finger, 3 sessions (1 Left, 2 Right), 0-90° in 10° bins
+
+No cutoff angle found. Confidence stayed flat and low (1.3-1.9) through 10-70° in all three runs, then rose sharply at 80-90° in all three (2.43, 2.83, 3.35) — the opposite of a breakdown signal. Checked against ROM span in that same bin rather than taking the rise at face value: spans collapsed there too (Run 2's joint 1 dropped to a 10.8° span vs. 22-44° everywhere else in that run; joint 2 dropped from 47.5° to 31.9° in Run 2 and 43.5° to 21.2° in Run 3), meaning less motion got captured in that bin — the same sweep-amplitude-inflates-confidence confound already documented above, not genuine improvement near the lateral extreme. Frame counts stayed solid throughout (76-393 per bin from 10° up in every run) — whatever's happening near 90°, MediaPipe isn't losing the hand outright.
+
+One lead, unconfirmed: joint 2's ROM span narrowed sharply at 80-90° in both Right-hand runs but stayed flat in the one Left-hand run — the same Left/Right asymmetry theme that showed up in the earlier discrete-capture data. Not resolved with n=1 Left rep against n=2 Right reps.
+
+### Test 4: inconclusive
+
+Neither the discrete two-capture design nor the continuous angle-binned redesign found a clean, repeatable signal for "does axis-fit confidence or ROM favor palm-facing over lateral for flexion," or a clear angle where measurement quality breaks down. Confidence appears to not discriminate meaningfully between orientations for real (non-idealized) finger flexion — real motion isn't clean single-axis regardless of camera angle, and the metric sits low (1.3-1.9) throughout the range tested. ROM shows an intriguing but unconfirmed Left/Right asymmetry in how it behaves near 90° that a future test could specifically target (e.g., several more reps split evenly by hand, focused just on the 70-90° range) if revisited. Closed for now.
+
+---
+
+## 2026-08-31 — Test 5 skipped; pivot from testing to implementation
+
+Test 5 (bilateral vs. unilateral) skipped on the user's own subjective assessment — no perceptible difference in hand movement between mirrored-bilateral and unilateral-resting elicitation, and if there is one, it's small. Not empirically measured; recorded here as a deliberate scope decision, not a validated finding.
+
+Reviewed the remaining tests (6–14) against what Tests 1–4 actually needed to be cheap: they only required machinery that already existed (`makeHand`, `fitNorms`, live stats). Tests 6–11 each need an algorithm that doesn't exist yet (still-window extraction, plateau detection, DIP/PIP coupling fit, enslaving-coefficient fit, thumb CMC/occlusion-guard logic) — building a throwaway version just to test it in isolation costs about as much as building it for real inside `/scan3`. Tests 12 and 14 are already explicitly deferred by `scan_tests.md`'s own text; Test 13 is the integration test, meant to run once everything else exists, not before. So none of the remaining tests are real prerequisites to starting `/scan3`.
+
+**Decision:** stop writing throwaway test infrastructure. Write each remaining algorithm in its real, final reusable form — the locations `scan3.md`'s own "Directory layout" already specifies — and validate each one with a lightweight live test page against the real library code, not a synthetic-only or reimplemented-for-testing version.
+
+### Implemented: `stillWindow.ts` and `plateau.ts`
+
+Both written at their `scan3.md`-specified locations (`src/routes/scan3/lib/completion/`), grouped together since the doc treats them as the same "completion detection" concern and they're both used across multiple phases.
+
+**`findStillWindow()`** — slides a fixed-duration window across a per-frame signal (after discarding an initial warmup period), keeps every placement where frame-to-frame velocity stays under a threshold throughout, and returns the lowest-variance one (not just the first one found). Verified against synthetic data: settle-then-hold correctly finds the window right after settling; constant drift correctly finds nothing; two candidate still windows of different noise levels correctly picks the quieter one, not the first one encountered.
+
+**`PlateauDetector`** — tracks running min/max per joint, detects rep boundaries via a hysteresis-based peak detector on the primary joint (dead-band before confirming a peak, so ordinary frame jitter doesn't get counted as a rep), and declares convergence once the last N reps each fail to grow any joint's range beyond a threshold. Verified against synthetic data: an amplitude sequence that grows then plateaus converges at the correct rep; a sequence that never plateaus never converges; a multi-joint case where two joints plateau but a third (simulating DIP) keeps growing correctly never converges — matching `scan_procedure.md`'s explicit requirement that every joint's own extremum has to converge, not just the nominal target joint's.
+
+Both verified against synthetic data only so far — not yet run against real capture. `src/routes/scan-tests/completion-detectors/+page.svelte` built to test them live (mode-switchable between the two, reuses the same detector/overlay/throttled-loop pattern established for the other scan-tests pages), feeding both the same 3-joint per-frame angle signal already used throughout this doc.
+
+### First live run: still-window's default velocity threshold was badly miscalibrated
+
+Baseline still-window run (genuine hold, default settings) found nothing. Root cause: `velocity()` combined all 3 tracked joints into one Euclidean-norm delta, which scales with `sqrt(dimension count)` — using Test 1's own established noise floor (~1.5-2.5deg per joint), ordinary frame-to-frame sensor noise alone already produces a combined-norm velocity over 100deg/s with 3 joints tracked, before any real movement. The default threshold (20deg/s) was rejecting normal sensor jitter as motion.
+
+Fixed two things: switched `velocity()` to max-per-component rather than combined-norm (doesn't scale with how many joints happen to be tracked, and better matches "no single joint is moving much" — the actual meaning of "still"); raised the page's default threshold from 20 to 100deg/s as a more realistic starting point. A synthetic worst-case check (fully independent, uncorrelated frame noise at Test 1's stdev) needed a threshold around 200deg/s to reliably pass even with zero real movement — real MediaPipe noise is likely _not_ fully independent frame-to-frame (the tracker uses the previous frame's region as a starting point, so consecutive-frame errors are probably correlated rather than white noise), so real data may need less headroom than that pessimistic synthetic model — genuinely unknown until tested live, hence raising the default rather than guessing a final number.
+
+### Test 6 answered: real threshold found by live tuning — window length matters more than threshold
+
+At the original 1s minimum window: 200deg/s worked but not reliably (passed once, failed on repeat genuine-still holds); 250deg/s worked repeatedly and still correctly failed the negative control (deliberate movement). That looked at first like the answer — until shorter windows were tried directly: **200deg/s at a 0.5s window, and 150deg/s at a 0.25s window, both worked more reliably than 250deg/s at the full 1s window.** Initially treated the shorter-window combinations as a side option traded off against a noisier mean (fewer samples to average); that was the wrong framing. The real mechanism is that a longer required window means more consecutive frame-pairs that all have to clear the velocity threshold _simultaneously_ — every extra sample in the window is another chance for one noisy frame to break the whole window — so window length, not threshold, is the dominant lever on reliability. Page default set to 200deg/s / 0.5s based on this.
+
+This closes Test 6 — the previously-open question ("does still-window auto-detection actually work against real, imperfect human stillness, and what threshold does it need") has a real, empirically-tuned answer now, not a guessed default. Worth remembering for `scan3.md`'s Phase 2/3 implementation: don't default to the doc's originally-assumed ~1s window without retesting against this finding.
+
+### Test 7 answered: plateau's rep-boundary hysteresis had the same miscalibration
+
+First live run: normal MediaPipe frame noise registered as ~5 reps in 15 frames — physically impossible (15 frames is ~0.5s, far too fast for real flex/extend cycles). Same root cause pattern as Test 6's threshold: the peak-detector's hysteresis dead-band (3°) was well inside Test 1's own established ~2-3° frame-to-frame noise floor, so ordinary jitter alone flipped the rising/falling state constantly, each flip counted as a confirmed peak. Confirmed with a synthetic check (clean 5-rep sequence with 2° noise superimposed): hysteresis=3 produced 32 spurious reps; hysteresis=10 and 15 both correctly counted 5. Raised the page default from 3° to 15°.
+
+Live retest at 15° hysteresis / 2° convergence threshold: 3 stable reps, correctly converged. No further tuning needed — unlike Test 6, the first raised default worked on the first real try.
+
+This closes Test 7. Both completion detectors (`stillWindow.ts`, `plateau.ts`) are now validated against real capture, not just synthetic data, with real tuned parameters instead of guessed ones. Three separate instances now, across this whole testing effort (Test 3's thumb bias, Test 6's velocity threshold, Test 7's peak hysteresis), of the same underlying lesson: parameters guessed from first principles or literature undershoot real MediaPipe noise by a wide margin, consistently in the same direction (too tight/too strict), and only live tuning against real capture catches it.

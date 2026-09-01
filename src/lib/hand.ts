@@ -126,7 +126,7 @@ function MAX_PAN(finger: Finger) {
 
 export type Joint =
   | { length: number; degree: 0; position: Vector3; V: Matrix4; Vinv: Matrix4 }
-  | { length: number; degree: 1 | 2; V: Matrix4; Vinv: Matrix4 }
+  | { length: number; degree: 1 | 2; V: Matrix4; Vinv: Matrix4; axisConfidence?: number }
 export type Finger = keyof typeof CONNECTIONS
 export type Joints = Record<Finger, Joint[]>
 
@@ -239,7 +239,13 @@ export function fitNorms(vecs: Vector3[], fit: boolean, length: number, matrix: 
 
   const Vinv = new Matrix4().makeBasis(x, y, z)
   const V = new Matrix4().copy(Vinv).invert()
-  return { length, V, Vinv, degree: fit ? 1 : 2 }
+  // q holds the singular values (not necessarily sorted) — the ratio of the top two expresses how
+  // well a single dominant axis explains the observed motion (large ratio: one axis dominates, small/
+  // near-1 ratio: the motion isn't well described by a single axis, whether from noise or genuine
+  // multi-axis movement). Previously computed and discarded; see docs/thumbs/scan_utility_evaluation.md.
+  const sortedQ = [...q].sort((a, b) => b - a)
+  const axisConfidence = sortedQ[1] !== 0 ? sortedQ[0] / sortedQ[1] : Infinity
+  return { length, V, Vinv, degree: fit ? 1 : 2, axisConfidence }
 }
 
 /** Find the interior angle of a cyclic quadrilateral (a quadrilateral whose vertices
