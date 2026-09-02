@@ -9,7 +9,7 @@
  * scan_tests.md's "DIP/PIP coupling fit quality").
  */
 
-import type { Finger, Hand } from '$lib/hand'
+import { type Finger, type Hand, signedJointAngle } from '$lib/hand'
 
 export interface DipPipCoupling {
   slope: number
@@ -27,13 +27,14 @@ export interface DipPipFit extends DipPipCoupling {
   samples: DipPipSample[]
 }
 
-/** PIP = angle between bones 1 and 2 of the finger's 4-bone chain; DIP = angle between bones 2 and 3 —
- * the same `limbs[j].angleTo(limbs[j + 1])` convention flexion-sweep's live ROM table already uses,
- * at j=1 and j=2 respectively. */
+/** PIP = signed angle between bones 1 and 2 of the finger's 4-bone chain; DIP = bones 2 and 3 — the
+ * same `signedJointAngle` convention flexion-sweep's live ROM table and `pairedSweep.ts` also use, at
+ * boneIndex 1 and 2 respectively. Signed rather than `angleTo`'s unsigned magnitude specifically so a
+ * DIP or PIP range that includes hyperextension isn't folded into ordinary flexion's numbers — see
+ * `signedJointAngle`'s doc comment in `$lib/hand.ts` for the sign convention and its caveats. */
 function pipDipAngles(hand: Hand, finger: Finger): [pip: number, dip: number] {
-  const limbs = hand.limbs[finger]
-  const pip = (limbs[1].angleTo(limbs[2]) * 180) / Math.PI
-  const dip = (limbs[2].angleTo(limbs[3]) * 180) / Math.PI
+  const pip = signedJointAngle(hand, finger, 1)
+  const dip = signedJointAngle(hand, finger, 2)
   return [pip, dip]
 }
 

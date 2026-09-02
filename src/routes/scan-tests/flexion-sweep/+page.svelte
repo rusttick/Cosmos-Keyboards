@@ -10,6 +10,7 @@
     type Hand,
     type Joint,
     objectFromFingers,
+    signedJointAngle,
   } from '$lib/hand'
   import { type DipPipFit, fitDipPipCoupling } from '../../scan3/lib/phases/flexion'
 
@@ -220,11 +221,12 @@
           const bin = bins[currentBinIndex]
           bin.history.push(hand)
 
-          const limbs = hand.limbs[finger]
           const newMin = [...bin.romMin]
           const newMax = [...bin.romMax]
           for (let j = 0; j < 3; j++) {
-            const angleDeg = (limbs[j].angleTo(limbs[j + 1]) * 180) / Math.PI
+            // Signed -- a negative reading is hyperextension past straight, not clamped into the
+            // same range as ordinary flexion the way Vector3.angleTo() alone would.
+            const angleDeg = signedJointAngle(hand, finger, j as 0 | 1 | 2)
             if (angleDeg < newMin[j]) newMin[j] = angleDeg
             if (angleDeg > newMax[j]) newMax[j] = angleDeg
           }

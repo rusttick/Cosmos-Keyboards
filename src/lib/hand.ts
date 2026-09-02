@@ -124,9 +124,33 @@ function MAX_PAN(finger: Finger) {
   // return 30 * DEG2RAD
 }
 
+/** The thumb CMC's conjunct (axial-twist) rotation, computed rather than independently driven — see
+ * `SolvedHand.fkBy`/`fromLimbs`'s `degree: 3` handling and `docs/thumbs/scan3.md`, "The thumb CMC."
+ * `twist ≈ aCoeff·flexion + bCoeff·abduction`.
+ *
+ * Belongs on `joints.thumb[1]` (governing the CMC-landmark-to-MCP-landmark segment, the actual first
+ * metacarpal), not `joints.thumb[0]`. MediaPipe models the wrist as a zero-width point, so the
+ * wrist-to-CMC-landmark segment (`thumb[0]`) sits too close to the CMC's own pivot to carry much real
+ * rotation — confirmed live and independently by published single-camera thumb motion capture research
+ * (docs/thumbs/test_results.md, 2026-09-01). `joints.thumb[0]` should stay `degree: 0` (fixed), the
+ * same convention every other finger's metacarpal already uses. */
+export interface ConjunctCoupling {
+  aCoeff: number
+  bCoeff: number
+  r2: number
+}
+
 export type Joint =
   | { length: number; degree: 0; position: Vector3; V: Matrix4; Vinv: Matrix4 }
   | { length: number; degree: 1 | 2; V: Matrix4; Vinv: Matrix4; axisConfidence?: number }
+  | {
+    length: number
+    degree: 3
+    V: Matrix4
+    Vinv: Matrix4
+    conjunctCoupling: ConjunctCoupling
+    axisConfidence?: number
+  }
 export type Finger = keyof typeof CONNECTIONS
 export type Joints = Record<Finger, Joint[]>
 
@@ -188,6 +212,38 @@ export function handOrientation(hand: Hand): Quaternion {
   return new Quaternion().setFromRotationMatrix(mat)
 }
 
+/** Signed flexion angle (degrees) between two consecutive bones in a finger's 4-bone chain:
+ * `boneIndex` 0 = the MCP bend (limb 0 vs. limb 1), 1 = PIP (limb 1 vs. limb 2), 2 = DIP (limb 2 vs.
+ * limb 3). Positive is ordinary flexion, negative is hyperextension past straight -- some people's
+ * natural ROM genuinely includes hyperextension, and `Vector3.angleTo()` alone (used everywhere in
+ * this codebase's live-capture tooling before this) is mathematically restricted to [0, 180] degrees,
+ * so it collapses both directions into the same unsigned magnitude and can't represent that.
+ *
+ * Sign convention (LIKE `thumbDepthSign` in scan-tests/lib/orientation.ts, THIS IS A BEST-GUESS
+ * CONVENTION, not yet verified against a real capture with known hyperextension): read off which way
+ * the bend rotates around the knuckle-line axis (pinky MCP -> index MCP, raw camera-space, mirrored
+ * for chirality the same way `palmAngleDeg` is), transformed into the same basis-standardized space
+ * `hand.limbs` already lives in -- the same axis is used for all three joints, since normal finger
+ * flexion is a hinge motion about roughly-parallel axes at MCP/PIP/DIP. If a real hyperextension
+ * capture comes back with the wrong sign, negate this convention -- it's a single, isolated flip, not
+ * a redesign, since every consumer downstream (PlateauDetector, coverageGrid, fitDipPipCoupling,
+ * fitEnslaving) already treats the sign as opaque data, not something it interprets. */
+export function signedJointAngle(hand: Hand, finger: Finger, boneIndex: 0 | 1 | 2): number {
+  const limbs = hand.limbs[finger]
+  const boneA = limbs[boneIndex]
+  const boneB = limbs[boneIndex + 1]
+  const unsignedAngle = boneA.angleTo(boneB)
+
+  const knuckleAxis = new Vector3()
+    .subVectors(hand.vectors[17], hand.vectors[5]) // pinky MCP -> index MCP, raw camera space
+    .applyMatrix4(hand.basis) // into the same standardized space boneA/boneB already live in
+  if (hand.handedness === 'Right') knuckleAxis.negate() // mirrored chirality, same as palmAngleDeg
+
+  const cross = new Vector3().crossVectors(boneA, boneB)
+  const sign = cross.dot(knuckleAxis) < 0 ? -1 : 1
+  return (sign * unsignedAngle * 180) / Math.PI
+}
+
 /** Create a joint by averaging together vectors.
  *
  * The joint's x axis will point in the average vector direction, and the z vector will point in the -z direction. */
@@ -206,6 +262,10 @@ export function averageNorms(v: Vector3[], length: number, matrix: Matrix4, degr
 
 function decompose(v: Vector3) {
   return [v.x, v.y, v.z] as Vector3Tuple
+}
+
+function clamp(x: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, x))
 }
 
 /** Create a joint by averaging vectors then setting the z direction to be along one of the principal components.
@@ -316,12 +376,17 @@ export class SolvedHand {
   fkBy(finger: Finger, fn: (i: number) => [number, number]) {
     this.matrices[finger].forEach((m, i) => {
       let [angleZ, angleY] = fn(i)
-      const degree = this.joints[finger][i].degree
+      const joint = this.joints[finger][i]
+      const degree = joint.degree
 
       if (degree < 1) angleZ = 0
       if (degree < 2) angleY = 0
 
-      m.makeRotationFromEuler(new Euler(0, angleY, angleZ, 'XYZ'))
+      // The thumb CMC's third rotation (twist) isn't independently driven -- it falls out of the
+      // saddle joint's geometry as a function of the other two. See ConjunctCoupling's doc comment.
+      const angleX = degree === 3 ? joint.conjunctCoupling.aCoeff * angleZ + joint.conjunctCoupling.bCoeff * angleY : 0
+
+      m.makeRotationFromEuler(new Euler(angleX, angleY, angleZ, 'XYZ'))
     })
   }
 
@@ -340,6 +405,21 @@ export class SolvedHand {
       x.normalize()
       const z = new Vector3(0, 0, 1).addScaledVector(x, -x.z).normalize()
       const y = new Vector3().crossVectors(z, x)
+
+      if (joint.degree === 3) {
+        // A direction vector only has two degrees of freedom -- it cannot reveal twist about its own
+        // axis -- so the z/y just built are a deterministic but physically arbitrary function of x,
+        // not the joint's true frame. Correct by recovering angleZ/angleY from x the same way
+        // SolvedHand.ik() already does for exactly this (observed-x -> YZ-Euler) problem, then
+        // rotating y/z about x by the conjunct-coupling-predicted twist, mirroring what fkBy() builds
+        // this matrix from in the first place.
+        const zAngle = Math.asin(clamp(x.y, -1, 1))
+        const yAngle = Math.asin(clamp(x.z / -Math.cos(zAngle), -1, 1))
+        const angleX = joint.conjunctCoupling.aCoeff * zAngle + joint.conjunctCoupling.bCoeff * yAngle
+        y.applyAxisAngle(x, angleX)
+        z.applyAxisAngle(x, angleX)
+      }
+
       m.makeBasis(x, y, z)
 
       reference.multiply(joint.Vinv).multiply(m)
@@ -394,14 +474,21 @@ export class SolvedHand {
     })
   }
 
+  /** Signed per-joint flexion angle (radians) for a finger's 4-joint chain: positive for ordinary
+   * flexion, negative for hyperextension past straight -- some people's natural ROM genuinely
+   * includes hyperextension, so this can't collapse both directions into the same magnitude the way
+   * the previous `angleTo()`-based version did. Just the Z-component of each joint's already-signed
+   * Euler decomposition (`decomposeAngles`), which is exactly the flexion angle `fkBy`/`fromLimbs`
+   * build these matrices from in the first place. */
   deg1Angles(finger: Finger) {
-    return this.matrices[finger].map((matrix) => {
-      const pos = new Vector3(1, 0, 0).applyMatrix4(matrix)
-      pos.z = 0
-      return pos.angleTo(new Vector3(1, 0, 0))
-    })
+    return this.decomposeAngles(finger).map((angles) => angles[2] as number)
   }
 
+  /** Net curl across the 4 non-thumb fingers, in degrees. Signed per-joint contributions (see
+   * deg1Angles) mean a hyperextended joint now partially cancels flexed joints elsewhere in the sum
+   * rather than both reading as positive "curl" -- a more accurate net measure, but callers that
+   * expect a non-negative progress value (e.g. a 0-1 UI gauge) need to clamp explicitly now, since a
+   * hand starting from a hyperextended rest pose can legitimately read as slightly negative. */
   approximateCurl() {
     const nonThumbs = FINGERS.filter(f => f != 'thumb')
     const fingerCurls = nonThumbs.map(f => sum(this.deg1Angles(f)))

@@ -151,7 +151,10 @@
   function curlQuality(hand: Hand, joints: Joints) {
     const solved = new SolvedHand(joints, new Matrix4())
     solved.fromAllLimbs(hand.limbs, true)
-    return Math.min(1, solved.approximateCurl() / 80)
+    // approximateCurl() is signed (hyperextension now reads negative rather than folding into a
+    // small positive "curl") -- clamp to the [0, 1] progress range this value has always been used
+    // as, since a rest pose with any hyperextension can otherwise start below 0.
+    return Math.max(0, Math.min(1, solved.approximateCurl() / 80))
   }
 
   let leftQuality = 0
