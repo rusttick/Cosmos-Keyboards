@@ -1,8 +1,20 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import createDetector, { type Detector } from '../lib/detector'
-  import { type Handedness } from '../lib/orientation'
-  import { drawHandOverlay } from '../lib/overlay'
+  import {
+    fingerCurlAgreesWithNormal,
+    type Handedness,
+    handPlaneNormal,
+    type PalmTilt,
+    palmTilt,
+  } from '../lib/orientation'
+  import {
+    drawHandOverlay,
+    drawPalmNormalOverlay,
+    drawVectorSpaceTopView,
+    drawVectorSpaceTriangle,
+  } from '../lib/overlay'
+  import PalmBubble from '../lib/PalmBubble.svelte'
   import { handOrientation, type Hand, type Joint } from '$lib/hand'
   import { Matrix4, Quaternion, Vector3 } from 'three'
   import {
@@ -12,6 +24,19 @@
     thumbMcpIpAngles,
     type ThumbSweepStatus,
   } from '../../scan3/lib/phases/thumbCmc'
+
+  // REVERTED: a blanket 180deg flip was tried here after live testing showed the arrow pointing out
+  // the back of the wrist during large sweeps. Then `static-hold`, using the exact same unflipped
+  // palmAngleDeg/handPlaneNormal formula on this same rig, was checked at a genuine static palm-facing pose
+  // and read ~10-15deg -- correct, not backwards. So the sign is fine at rest, on this rig, with this
+  // formula; a blanket flip would have made the rest reading wrong (~165-170deg) to fix a problem that
+  // only shows up mid-sweep. The bug isn't a constant offset -- something flips it partway through
+  // certain rotations specifically. Leading hypothesis: MediaPipe's handedness classification (Left/
+  // Right) is a separate, imperfect prediction from landmark tracking, and handPlaneNormal() negates based
+  // on it -- a brief misclassification during a hard, self-occluding rotation would flip the normal for
+  // exactly those frames while leaving rest (and easy poses) correct. `handedness`/`score` are now
+  // shown live (below) to check this directly: watch whether handedness changes during the same
+  // rotations that showed the arrow backwards.
 
   type Mode = 'outer' | 'freeform'
   type Phase = 'idle' | 'recording'
@@ -55,6 +80,28 @@
   let rid: number
   let loopTicks = 0
   let staleResetAttempted = false
+  let currentTilt: PalmTilt | undefined
+  // Independent check on handPlaneNormal()'s sign, from middle/ring finger curl direction rather than
+  // another projection of the same landmarks -- see fingerCurlAgreesWithNormal's doc comment.
+  // undefined when neither finger is flexed enough to give a usable signal.
+  let currentCurlCheck: number | undefined
+  // MediaPipe's own handedness classification, re-run every frame -- a separate, imperfect prediction
+  // from landmark tracking. handPlaneNormal() negates based on it, so a brief misclassification during a
+  // hard/self-occluding pose would flip the normal for exactly those frames. Tracked here (plus a
+  // running count of how many times it's changed mid-recording) to check that hypothesis directly
+  // against the arrow-points-backwards finding -- see the note above the script's top.
+  let currentHandedness: 'Left' | 'Right' | undefined
+  let handednessFlipCount = 0
+
+  // --- Palm-tilt calibration --------------------------------------------------------------------
+  // Live capture found a consistent ~10deg baseline offset in the bubble/totalDeg reading at true
+  // physical level -- see palmTilt's `reference` doc comment. Calibrating re-zeros against a sampled
+  // "level" pose instead of hardcoding that number, so it's per-session/per-rig, not baked into the
+  // model. Not wired into anything the guard uses -- diagnostic/positioning aid only.
+  const CALIBRATION_FRAMES = 15
+  let calibrating = false
+  let calibrationBuffer: Vector3[] = []
+  let calibrationReference: Vector3 | undefined
 
   // --- Outer sweep (Phase 6a) state -----------------------------------------------------------
   const START_REFERENCE_FRAMES = 5
@@ -99,6 +146,38 @@
   $: noHandDetected =
     phase !== 'idle' && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
 
+  // Reported alongside both summaries so a session's numbers can always be read against whether (and
+  // against what) the palm-tilt bubble was calibrated -- see palmTilt's `reference` doc comment.
+  $: calibrationSummary = calibrationReference
+    ? `palm-tilt calibration: reference normal (${calibrationReference.x.toFixed(
+        3
+      )}, ${calibrationReference.y.toFixed(3)}, ${calibrationReference.z.toFixed(3)}), ${(
+        (calibrationReference.angleTo(new Vector3(0, 0, 1)) * 180) /
+        Math.PI
+      ).toFixed(1)}° raw offset from camera-forward at "true level"`
+    : 'palm-tilt calibration: none -- readings below are raw (uncalibrated, camera-forward-relative)'
+  $: currentTiltSummary = currentTilt
+    ? `current palm tilt: x=${currentTilt.x.toFixed(3)}, y=${currentTilt.y.toFixed(
+        3
+      )}, z=${currentTilt.z.toFixed(3)}, ${currentTilt.totalDeg.toFixed(1)}° off level (${
+        calibrationReference ? 'calibrated' : 'raw'
+      })`
+    : 'current palm tilt: no hand detected'
+  // Independent, unverified hypothesis for "which side is the palm on" -- see
+  // fingerCurlAgreesWithNormal's doc comment. Logged alongside the 3D-normal-based reading so a session
+  // records both signals and lets them be compared after the fact, not just watched live.
+  $: currentCurlCheckSummary =
+    currentCurlCheck === undefined
+      ? 'finger-curl check: not enough MCP flexion to check (need middle & ring both flexed)'
+      : `finger-curl check (unverified): normal ${
+          currentCurlCheck > 0 ? 'AGREES with' : 'DISAGREES with'
+        } curl direction (dot=${currentCurlCheck.toFixed(3)})`
+  $: handednessSummary =
+    `handedness classification: selected ${handedness}, currently reading ${currentHandedness ?? '—'}` +
+    (handednessFlipCount > 0
+      ? ` -- FLIPPED to the other label ${handednessFlipCount}x this recording`
+      : ' -- no flips seen this recording')
+
   $: outerSummary = [
     `outer sweep: ${handedness}, ${outerHistory.length} frames`,
     `status: ${outerStatus}${outerGuard ? ` (max swept: ${outerGuard.max.toFixed(1)}°)` : ''}`,
@@ -110,6 +189,10 @@
           'axisConfidence' in cmcJoint ? cmcJoint.axisConfidence?.toFixed(2) : '—'
         }`
       : 'axis not yet fitted -- press "Fit axis from history" once converged',
+    calibrationSummary,
+    currentTiltSummary,
+    currentCurlCheckSummary,
+    handednessSummary,
   ].join('\n')
 
   $: freeformSummary = [
@@ -125,6 +208,10 @@
     `thumb IP ROM (byproduct): ${
       ipMin === Infinity ? '—' : `${ipMin.toFixed(1)} to ${ipMax.toFixed(1)}`
     }`,
+    calibrationSummary,
+    currentTiltSummary,
+    currentCurlCheckSummary,
+    handednessSummary,
   ].join('\n')
 
   /** Unsigned magnitude for "how far has the CMC swept from its start position" -- total angular
@@ -180,6 +267,8 @@
 
   async function start() {
     error = undefined
+    currentHandedness = undefined
+    handednessFlipCount = 0
     if (mode === 'outer') {
       outerHistory = []
       startFrameBuffer = []
@@ -253,11 +342,39 @@
       .estimateHands(video, { flipHorizontal: true })
       .then((hands) => {
         const hand = hands[handedness]
-        if (!hand) return
+        if (!hand) {
+          currentTilt = undefined
+          currentCurlCheck = undefined
+          // The selected hand vanished this frame -- if MediaPipe instead reported the *other* label,
+          // that's direct evidence of a handedness misclassification (the same physical hand briefly
+          // relabeled), not just a missed detection.
+          const opposite = handedness === 'Left' ? 'Right' : 'Left'
+          if (hands[opposite]) {
+            handednessFlipCount++
+            currentHandedness = opposite
+          }
+          return
+        }
         currentScore = hand.score
         lastFrameAt = elapsed
         staleResetAttempted = false
         drawHandOverlay(overlayCanvas, hand.hand.keypoints)
+        currentTilt = palmTilt(hand, calibrationReference)
+        currentCurlCheck = fingerCurlAgreesWithNormal(hand)
+        currentHandedness = hand.handedness as 'Left' | 'Right'
+        drawPalmNormalOverlay(overlayCanvas, hand.hand.keypoints, currentTilt)
+        drawVectorSpaceTriangle(overlayCanvas, hand, currentTilt)
+        drawVectorSpaceTopView(overlayCanvas, hand, currentTilt)
+
+        if (calibrating && hand.score >= 0.7) {
+          calibrationBuffer.push(handPlaneNormal(hand))
+          if (calibrationBuffer.length >= CALIBRATION_FRAMES) {
+            calibrationReference = calibrationBuffer
+              .reduce((acc, v) => acc.add(v), new Vector3())
+              .normalize()
+            calibrating = false
+          }
+        }
 
         if (phase !== 'recording') return
 
@@ -358,7 +475,24 @@
     phase = 'idle'
     cancelAnimationFrame(rid)
     teardownCamera()
+    currentTilt = undefined
+    currentCurlCheck = undefined
     if (mode === 'freeform') refitConjunct()
+  }
+
+  /** Starts sampling handPlaneNormal() for CALIBRATION_FRAMES frames (score-gated) to average into a new
+   * calibration reference -- hold the hand at the known-true-level reference pose while this runs.
+   * Only meaningful while recording (that's the only time a hand is being detected at all). */
+  function startCalibration() {
+    if (phase !== 'recording') return
+    calibrationBuffer = []
+    calibrating = true
+  }
+
+  function resetCalibration() {
+    calibrating = false
+    calibrationBuffer = []
+    calibrationReference = undefined
   }
 
   onDestroy(() => {
@@ -506,6 +640,39 @@
       bind:this={overlayCanvas}
       class="absolute inset-0 w-full h-full object-contain pointer-events-none"
     />
+    {#if currentTilt}
+      <div class="absolute top-2 right-2 bg-black/60 rounded-lg p-2 flex flex-col items-center gap-1">
+        <PalmBubble tiltX={currentTilt.x} tiltY={currentTilt.y} totalDeg={currentTilt.totalDeg} />
+        <span class="text-xs text-gray-300 font-mono">
+          normal z: {currentTilt.z.toFixed(3)}
+        </span>
+        {#if currentCurlCheck !== undefined}
+          <span
+            class="text-xs font-mono"
+            class:text-emerald-400={currentCurlCheck > 0}
+            class:text-red-400={currentCurlCheck < 0}
+          >
+            curl check: {currentCurlCheck > 0 ? 'agrees' : 'DISAGREES'} ({currentCurlCheck.toFixed(3)})
+          </span>
+        {/if}
+        <span class="text-xs font-mono" class:text-amber-400={handednessFlipCount > 0}>
+          handedness: {currentHandedness ?? '—'} (selected {handedness}){handednessFlipCount > 0
+            ? ` -- flipped ${handednessFlipCount}x!`
+            : ''}
+        </span>
+        <span
+          class="text-xs"
+          class:text-emerald-400={!!calibrationReference}
+          class:text-gray-500={!calibrationReference}
+        >
+          {calibrating
+            ? `calibrating... ${calibrationBuffer.length}/${CALIBRATION_FRAMES}`
+            : calibrationReference
+            ? 'calibrated'
+            : 'raw (uncalibrated)'}
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="mb-4 flex gap-2">
@@ -530,6 +697,25 @@
         on:click={fitAxis}
       >
         <span class="block bg-slate-900 px-6 py-2 rounded-1.5 font-semibold">Fit axis from history</span>
+      </button>
+    {/if}
+    {#if phase === 'recording'}
+      <button
+        class="bg-gradient-to-br from-sky-400 to-blue-600 text-lg p-1 rounded-2 shadow-lg disabled:opacity-50"
+        on:click={startCalibration}
+        disabled={calibrating}
+      >
+        <span class="block bg-slate-900 px-6 py-2 rounded-1.5 font-semibold"
+          >{calibrating ? 'Calibrating...' : 'Calibrate level (hold pose)'}</span
+        >
+      </button>
+    {/if}
+    {#if calibrationReference}
+      <button
+        class="bg-gradient-to-br from-slate-500 to-slate-700 text-lg p-1 rounded-2 shadow-lg"
+        on:click={resetCalibration}
+      >
+        <span class="block bg-slate-900 px-6 py-2 rounded-1.5 font-semibold">Reset calibration</span>
       </button>
     {/if}
   </div>
@@ -697,6 +883,24 @@
         the recorded ROM. Fixed the same way: `mcp`/`ip` are now each smoothed (5-frame moving average, via
         the same `makeSmoother()` the outer-sweep proxy uses) before updating the running extrema, rather
         than taking the raw per-frame value directly.
+      </p>
+      <p>
+        <strong
+          >Palm-tilt bubble: found reliable rotating the thumb away from the camera and wrist/finger
+          extension, unreliable rotating the thumb toward the camera and wrist/finger flexion toward it</strong
+        >
+        — the two failure directions are exactly the ones that foreshorten the `[0, 5, 17]` landmark triangle
+        toward the camera, pushing more of the fitted normal's magnitude into its depth (z) component (exposed
+        live as `normal z` above) rather than the x/y the bubble displays — the same monocular-depth weakness
+        this whole test suite keeps finding (see the toward-camera swept-distance note above). Also found
+        a consistent <strong>~10° baseline offset</strong> at true physical level — the `[0, 5, 17]`
+        triangle's normal isn't exactly the anatomical palm normal, so it never quite reads 0° even when
+        level, which is expected and not itself a bug. <strong>Calibrate level</strong> re-zeros against a
+        sampled reference instead of guessing that offset away: press it while holding the hand at a known-true-level
+        pose, hold still for the ~15-frame sample, and every reading (bubble, `normal z`, the numeric degrees)
+        becomes relative to that reference. This is a per-session/per-rig live calibration, not a hardcoded
+        constant — deliberately, so a future `scan3` implementation can run the same calibration as an early
+        step rather than baking today's ~10° into the model.
       </p>
     </div>
   </details>

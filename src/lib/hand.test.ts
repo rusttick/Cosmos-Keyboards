@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { Matrix4, Vector3 } from 'three'
-import { type ConjunctCoupling, type Finger, type Hand, type Joint, type Joints, objectFromFingers, signedJointAngle, SolvedHand } from './hand'
+import { type ConjunctCoupling, type Finger, type Hand, type Joint, type Joints, makeHand, objectFromFingers, type PoseHand, signedJointAngle, SolvedHand } from './hand'
 
 function makeJoint(degree: 0 | 1 | 2): Joint {
   if (degree === 0) {
@@ -191,6 +191,53 @@ function syntheticHand(thetaRad: number, handedness: 'Left' | 'Right' = 'Left'):
     basis: new Matrix4(), // identity
   }
 }
+
+/** A minimal synthetic PoseHand: only landmarks 0 (wrist), 5 (index MCP), and 17 (pinky MCP) are
+ * meaningful -- the only three the palm-plane basis now reads from (2026-09-02 palm-definition fix,
+ * see docs/thumbs/test_results.md). Everything else is zeroed. */
+function syntheticPoseHand(handedness: 'Left' | 'Right'): PoseHand {
+  const pts = new Array(21).fill(0).map(() => ({ x: 0, y: 0, z: 0, visibility: 1 }))
+  pts[0] = { x: 0, y: 0, z: 0, visibility: 1 }
+  pts[5] = { x: 1, y: 0.2, z: 0.1, visibility: 1 }
+  pts[17] = { x: 0.3, y: -0.5, z: 0.05, visibility: 1 }
+  return {
+    keypoints: pts as any,
+    keypoints3D: pts as any,
+    handedness,
+    score: 1,
+  }
+}
+
+describe('makeHand basis (palm plane defined by landmarks [0, 5, 17])', () => {
+  test('produces an orthonormal, proper-rotation frame for both handedness values', () => {
+    for (const handedness of ['Left', 'Right'] as const) {
+      const hand = makeHand(syntheticPoseHand(handedness))
+      const rot = new Matrix4().extractRotation(hand.basis)
+      const e = rot.elements
+      const col = (i: number) => new Vector3(e[i * 4], e[i * 4 + 1], e[i * 4 + 2])
+      const x = col(0), y = col(1), z = col(2)
+
+      expect(x.length()).toBeCloseTo(1, 5)
+      expect(y.length()).toBeCloseTo(1, 5)
+      expect(z.length()).toBeCloseTo(1, 5)
+      expect(x.dot(y)).toBeCloseTo(0, 5)
+      expect(y.dot(z)).toBeCloseTo(0, 5)
+      expect(x.dot(z)).toBeCloseTo(0, 5)
+      // Proper rotation (no reflection): determinant +1.
+      expect(rot.determinant()).toBeCloseTo(1, 5)
+    }
+  })
+
+  test('does not depend on landmark 1 (thumb CMC) at all', () => {
+    const base = syntheticPoseHand('Left')
+    const perturbed = syntheticPoseHand('Left')
+    ;(perturbed.keypoints3D[1] as any) = { x: 5, y: -3, z: 2, visibility: 1 }
+
+    const basisBase = makeHand(base).basis
+    const basisPerturbed = makeHand(perturbed).basis
+    expect(basisPerturbed.elements).toEqual(basisBase.elements)
+  })
+})
 
 describe('signedJointAngle', () => {
   test('a zero bend reads as ~0 degrees', () => {

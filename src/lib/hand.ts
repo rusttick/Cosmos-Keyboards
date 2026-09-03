@@ -156,22 +156,31 @@ export type Joints = Record<Finger, Joint[]>
 
 /** Create a basis to orient the hand in a standard position.
  * This standardizes the orientation of all hands.
- * The re-orientation uses the vectors between thumb->pinky MCPs and the middle finger MCP->CMC.
+ *
+ * The palm plane is defined by landmarks [0, 5, 17] (wrist, index MCP, pinky MCP) -- deliberately
+ * NOT landmark 1 (thumb CMC), which the previous version of this function used. That was circular
+ * for anything measuring thumb motion: the reference frame the thumb's own motion gets expressed in
+ * would be partly built from a thumb landmark. Matches `orientation.ts`'s already-validated
+ * `palmAngleDeg()` formula (same two vectors, same per-handedness negation), which never had this
+ * problem since it was written independently. See docs/thumbs/test_results.md, 2026-09-02.
  */
 function makeBasis(vectors: Vector3[], reverse: boolean) {
-  const up = new Vector3()
-    .subVectors(vectors[CONNECTIONS.middleFinger[0][1]], vectors[CONNECTIONS.middleFinger[0][0]])
+  const v1 = new Vector3()
+    .subVectors(vectors[CONNECTIONS.indexFinger[0][1]], vectors[CONNECTIONS.indexFinger[0][0]])
+    .normalize()
+  const v2 = new Vector3()
+    .subVectors(vectors[CONNECTIONS.pinky[0][1]], vectors[CONNECTIONS.pinky[0][0]])
     .normalize()
 
-  const left = new Vector3()
-    .subVectors(vectors[CONNECTIONS.pinky[0][1]], vectors[CONNECTIONS.thumb[0][1]])
-    .normalize()
-  if (reverse) left.negate()
+  const x = new Vector3().crossVectors(v1, v2).normalize()
+  if (reverse) x.negate()
 
-  const proj = new Vector3().addScaledVector(up, up.dot(left))
-  left.sub(proj).normalize()
+  // Seed "up" from v1 (wrist -> index MCP), then Gram-Schmidt it orthogonal to the palm normal --
+  // the same construction the previous version used to orthogonalize its two reference vectors.
+  const up = v1.clone()
+  up.addScaledVector(x, -x.dot(up)).normalize()
 
-  const x = new Vector3().crossVectors(up, left)
+  const left = new Vector3().crossVectors(x, up)
 
   return new Matrix4().makeBasis(x, up, left)
 }
