@@ -568,14 +568,128 @@ export interface Handedness {
 
 ---
 
+## 2026-09-03 — `hand.score` answered: doesn't predict misclassification, stays in the 90s even when tracking is visibly bad
+
+Answered by live observation (`hand.score` surfaced next to the palm-tilt bubble in `thumb-cmc`, moved to just above the result summary): the score sits in the 90s even during frames where tracking is clearly going wrong — it does not dip ahead of, or during, the problems it would need to predict. Closes the "NEEDS TESTING" item above in the negative: `score` is not a usable early-warning signal for handedness flips (or apparently for tracking quality generally) on this rig.
+
+**Consequence for the plan below:** step 1 ("test whether `hand.score` predicts flips") is done, and the answer rules out the score-informed branch of step 2. The stabilization mechanism has to be a hold/hysteresis purely on the classified label itself, blind to its own confidence value, not a threshold tuned against `score`.
+
+---
+
+## 2026-09-03 — Palm-tilt bubble's "random per-session offset" traced to a wiring bug, not a measurement limitation
+
+Reported symptom: the palm-tilt bubble starts each recording offset from true level by a different, unpredictable amount, then holds that offset steady for the whole run rather than drifting further.
+
+Checked whether any known technique gets an absolute "level" reference from a single RGB camera with no IMU/gravity input — there isn't one; every monocular hand-tracking system that needs an absolute orientation reference self-calibrates against an assumed neutral/rest pose at the start of a session, the same "average a short buffer, don't trust one frame" pattern this doc already uses elsewhere (`startMetacarpal`/`startOrientation` in `thumb-cmc`).
+
+That mechanism already existed here too — `calibrationReference`, averaged from 15 score-gated `handPlaneNormal()` samples — but it was wired to a manual "Calibrate level" button (`startCalibration()`) that `start()` never invoked. `start()` already resets `startMetacarpal`/`startOrientation` for a fresh per-recording reference, but left `calibrationReference` untouched, so unless the button was pressed before every single recording, `palmTilt()` silently fell back to the raw camera-forward-relative reading for the entire run — an offset equal to however far that session's actual starting pose happened to sit from the camera's optical axis, which varies session to session with hand placement/rig setup and stays constant through the run because nothing re-anchors it. Matches the reported symptom exactly.
+
+**First fix (superseded below):** `start()` set `calibrating = true` itself, reusing the manual button's averaging code path, so leveling ran unconditionally the instant Start was clicked.
+
+**Superseded by an explicit pre-recording pipeline**, prompted by a real workflow requirement: pressing Start with the mouse using the same hand that then has to move into frame, meaning the target hand often isn't in view yet at the moment Start is clicked — auto-leveling immediately would average garbage/absent-hand frames instead of the real starting pose. `thumb-cmc`'s `Phase` type gained three states ahead of `recording`: `waiting-for-hand` (until anything is detected), `settling` (10 consecutive score-gated frames, so the detector's first, least-stable lock isn't what gets leveled against), `leveling` (the same ~15-frame calibration average as before), then `recording`. Each phase is shown live as a colored badge overlaid directly on the video feed, not just in the text summary. `recordingStartElapsed` was added so `sessionDuration`'s auto-stop timer starts counting at the moment `recording` actually begins, not at Start — otherwise time spent getting the hand into frame would eat into the capture budget. Losing the hand mid-`settling`/`leveling` (stale for >1s) drops back to `waiting-for-hand` rather than carrying a broken streak forward. The manual "Calibrate level" button still works mid-recording, unchanged, for an explicit re-calibration against a deliberately-held truer level pose. `npm run check` clean. Not yet re-verified live — next `thumb-cmc` run should show the badge progressing through all four states and the bubble settling near center once recording actually starts, using whatever pose the hand happened to be in once it arrived and steadied, not the pose it was in the instant Start was clicked.
+
+---
+
+## 2026-09-03 — Rotation-vs-flexion negative control re-run post-`makeBasis()` fix: still conflated
+
+Re-ran the rigid-forearm-rotation negative control (thumb held still, hand/wrist rotated) against the current code, post the 2026-09-02 landmark-1 `makeBasis()` fix. Answer: **max-swept still climbs from pure hand rotation alone** — the conflation is not resolved by that fix.
+
+This is worth being precise about, since it clarifies what the earlier fix actually did. `hand.limbs.thumb[1]` is already expressed relative to `hand.basis` — in principle a perfect basis should cancel whole-arm rotation on its own, since the thumb bone's direction _relative to the hand_ shouldn't change under a rigid whole-arm rotation. That it still does means `hand.basis` itself drifts under rotation, most likely from monocular depth noise in the landmarks (`0`, `5`, `17`) that define it, worsening with rotation magnitude (more foreshortening off-axis). The landmark-1 fix addressed a different, unrelated bug (the backwards-normal circularity, where a thumb landmark helped define the frame the thumb's own motion was measured against) — it was never expected to fix this, and didn't.
+
+**Consequence:** the handedness-flip-stabilization item in the standing plan above is no longer the most direct prerequisite for this specific problem — a stable label wouldn't fix a magnitude/precision issue in the basis fit, only a sign error. It's still worth doing for its own sake (the arrow-points-backwards problem is real and separate), but isn't blocking the rotation/flexion separation work specifically.
+
+### Built: in-page rotation-vs-flexion analysis table, replacing a file-export/offline-script plan
+
+Original plan was a JSON export button plus an offline Bun analysis script (following `scan_tests/analyze-static-hold.ts`'s established pattern of dumping raw per-frame `keypoints`/`keypoints3D` and recomputing via `$lib/hand.ts` afterward). **Changed on request**: the user wants to read/paste the analysis directly from the page rather than round-tripping a file, so the computation moved in-browser instead — `computeRotationAnalysis()` in `thumb-cmc/+page.svelte`, producing a selectable CSV block (`t, score, palmRotationDeg, rawBoneAngleDeg, basisRelativeAngleDeg`) shown under a new "Rotation-vs-flexion analysis" section once a run stops, alongside the existing "Result summary" panel. `outerElapsed` (parallel array to `outerHistory`) was added to give each frame a real timestamp for this, since `outerHistory` alone didn't retain one.
+
+Two of the three originally-planned columns turned out to be one: an "explicit correction, subtract the measured whole-hand rotation from the raw bone vector" column was dropped before being built, because `handOrientation()` is derived from the exact same per-frame basis fit as `hand.limbs` already is — applying it by hand to "correct" the raw vector reproduces `basisRelativeAngleDeg` exactly, not a different number. A genuinely different correction would need a _different_ orientation estimate than the current single-frame 3-point fit — e.g. a temporally-smoothed one — which is a real next experiment, not yet built.
+
+`npm run check` clean. Not yet used for real analysis — next step is running the rigid-rotation negative control (and a real sweep) through this table and reading the actual numbers, rather than the yes/no answer already established above.
+
+### Negative control run through the table: quantified, not just yes/no
+
+1528-frame rigid-rotation run (thumb held still, hand/wrist rotated through ~83° of palm rotation) analyzed offline from the pasted CSV. Confirms the conflation, but the shape is more specific and more useful than a flat yes/no:
+
+- `rawBoneAngleDeg` (uncorrected) tracks `palmRotationDeg` almost 1:1 (slope 0.71, r=0.89) -- the expected full contamination with no correction applied.
+- `basisRelativeAngleDeg` (the actual `hand.limbs.thumb[1]` production signal) reaches **33°** at points despite zero real thumb motion -- comparable to a real CMC's ROM (~40-60°) and well above the growth-guard's `minPlausibleMax` floor (15°). This rigid-rotation-only run could have spuriously "converged" as a fake CMC sweep.
+- The basis correction is doing real, partial work, not nothing: it cuts the raw leak substantially (raw hits 68° at peak palm rotation; basis only 7.8° at that same instant), and its rank correlation with palm rotation (Spearman 0.37) is much weaker than raw's (0.87). But binned by `palmRotationDeg`, the residual doesn't scale cleanly with angle -- mean sits anywhere from 7-21° with no consistent trend, more like a noise floor than a proportional leak.
+- Two things predict how bad the residual gets: rotation _speed_ (`|palm rotation velocity|` correlates 0.31 with the residual -- faster whole-hand rotation leaks more, matching the existing toward-camera/motion-blur pattern), and `hand.score` (correlates **-0.73**, much stronger) -- the opposite of the earlier handedness-flip finding (score didn't predict that), but for _this_ failure mode, confidence is a real predictor.
+- Confidence-gating alone doesn't fully solve it though: restricting to `score >= 0.97` frames during `palmRotation > 40°` still leaves the residual averaging ~10.5° (max 18.5°). At `score >= 0.97` AND `palmRotation < 10°` (both conditions satisfied), residual drops to ~3.1° mean (max 8.3°) -- small relative to real CMC ROM, i.e. a plausible noise floor to design around.
+
+**Conclusion:** not a simple proportional-subtraction problem, and confidence-gating alone isn't enough to trust the corrected signal through a large rotation. Backs up physical bracing as the most robust mitigation for the magnitude this residual can reach.
+
+### Pivot: bounded hand-plane rotation per scan-procedure step, no external bracing
+
+User's response to the above: rather than chase an algorithmic correction or require external bracing hardware, `scan_procedure.md` can be designed so **every step keeps hand-plane-normal movement bounded** (self-discipline during capture, not a brace) -- i.e. each phase's instructions include "keep the palm steady" as a first-class constraint, with the existing live rotation readout as real-time feedback, rather than trying to separate rotation from flexion after the fact.
+
+The tooling already supports testing this directly, no new code needed: `thumb-cmc`'s outer sweep already shows `displayedPalmRotation` live (amber past 5°) during recording, and the new rotation-vs-flexion analysis table (above) gives a full post-hoc readout to check afterward. Based on the negative-control numbers just established, **~10° looks like a reasonable target bound** to consciously hold `palmRotationDeg` under during a real thumb-flexion sweep -- inside that range (and at reasonable confidence) the residual noise floor measured above was only ~3-8°, small relative to real CMC ROM.
+
+**Next test:** a real thumb-flexion sweep, consciously trying to keep the hand plane steady (watching the live amber warning), analyzed the same way. This checks two things at once: whether a person can actually hold rotation under ~10° for the duration of a sweep without external bracing, and whether `basisRelativeAngleDeg` under that condition tracks real thumb motion cleanly.
+
+---
+
+## 2026-09-04 — Landmark denoising (despike + One Euro filter) and a scoping decision that incidentally fixes the handedness-flip problem
+
+### The problem
+
+Real capture motion for this scanning procedure is slow and full-range-of-motion (unlike, say, a fast gesture), but the live keypoint overlay visibly "danced" -- roughly tracking real motion but jittering on top of it. Slow, deliberate motion is the favorable case for aggressive smoothing: there's little genuine high-frequency signal to lose, so heavy denoising costs little lag.
+
+### Design
+
+Chose the **1€ (One Euro) filter** (Casiez, Roussel, Vogel 2012) over a fixed-window moving average: its cutoff adapts to estimated speed, so it smooths hard while a landmark is nearly still and loosens automatically during genuine fast motion, rather than trading a single fixed amount of lag for smoothing everywhere. Preceded by a **median-of-3 despike** per coordinate, so a lone bad frame (this doc's found several of these already -- Test 6's velocity-threshold miscalibration, Test 7's peak-hysteresis miscalibration, the thumb-CMC ROM byproduct's 100°+ spans) gets outvoted by its neighbors instead of corrupting a running min/max or feeding into the One Euro filter's own state.
+
+No existing dependency provided this (checked `package.json` -- nothing signal-processing-related) and the whole thing is small (~30 lines for One Euro, ~15 for despike), so it's hand-written rather than a new dependency, per this project's "prefer reusing what's there" convention.
+
+**Implemented at `src/routes/scan-tests/lib/landmarkFilter.ts`** (+ `landmarkFilter.test.ts`, 6 cases, synthetic-only per this doc's established verify-before-live pattern): `OneEuroFilter` (single scalar, real elapsed-time `dt` rather than an assumed fixed frame rate) and `LandmarkFilter` (despike + One Euro per landmark, per coordinate). A gap since a landmark's last update longer than `maxGapSeconds` resets that landmark's despike/One-Euro state entirely, rather than filtering a resumed signal against stale pre-gap history -- same "reset rather than fight a gap" pattern as `detector.reset()` after a stall.
+
+**Wired into `detector.ts`, upstream of `makeHand()`** -- two independent `LandmarkFilter` instances (`keypoints`, the 2D image-normalized set; `keypoints3D`, the 3D world-landmark set), applied to MediaPipe's raw output before anything else touches it. This means every consumer (the overlay, bone vectors, joint angles, orientation) sees one filtered signal instead of each capture page inventing its own page-local smoother over some derived value -- confirmed by tracing `Hand.hand`/`Hand.vectors`/`Hand.limbs`/`Hand.basis` all the way back to the filtered `keypoints`/`keypoints3D` arrays. `hand.score` (handedness-classification confidence, not landmark quality -- see 2026-09-02 entry) is deliberately left unfiltered; there's no landmark position to despike, and this doc already found `score` doesn't predict tracking-quality problems anyway.
+
+### A design question that changed the architecture: handedness flips vs. per-label filter state
+
+Before implementing, walked through what happens when a per-label filter (one instance per `Left`/`Right`) meets a handedness misclassification (this doc's own well-established finding -- `handednessFlipCount`, 2026-09-02/09-03): a glitched frame's real landmarks would feed the _wrong_ label's filter (which has no real history in a single-hand capture), while the correct label's filter sees a dropout. Worse, the dropout distorts the filter on resume in two specific ways: the despike window compares against samples that are further apart in time than it assumes, and (if `dt` isn't handled carefully) a value that moved a normal amount over a doubled time gap reads as moving twice as fast, loosening the One Euro filter's smoothing right when it should be cautious. Net effect: every handedness flip would produce a localized filter artifact on top of the raw dropout.
+
+**Resolved by scoping, not by patching the filter.** The user agreed to limit scanning to one hand per session. This let handedness classification be removed from the per-frame path entirely rather than stabilized: `detector.ts` now fixes `maxNumHands` to 1 and takes the physical hand to scan as a declared constant for the whole session, instead of reading `hands[handedness]` keyed by MediaPipe's own per-frame Left/Right label. The single detected hand (whatever label MediaPipe assigns it internally) is always treated as the declared hand.
+
+This is a bigger fix than it looks: `handPlaneNormal()`'s sign depends on `hand.handedness`, and the entire 2026-09-02/09-03 investigation (arrow points backwards mid-sweep, `handednessFlipCount` climbing with real movement) traced that specifically to per-frame classification instability. With handedness now a session-level constant instead of a per-frame classifier output, there is no more per-frame label for `handPlaneNormal()` to depend on -- it structurally cannot flip mid-session anymore. The gap/despike interaction above is also moot: with only one hand ever tracked, an ordinary dropout (occlusion, low confidence, hand briefly out of frame) is the only kind of gap left, and `maxGapSeconds` already handles that.
+
+**New responsibility split, per the user's explicit direction:** each scanning-procedure step is now on the hook for identifying its own bad data (occlusion, low confidence, implausible motion) rather than the detector guessing whether a frame is trustworthy. `hand.score` and the existing per-page confidence gates are the mechanism for that; nothing new was added here beyond what already existed.
+
+### Cleanup
+
+Removed from `thumb-cmc/+page.svelte`, now redundant given upstream filtering: the page-local `makeSmoother()` factory and its four instances (`smoothedProxy`, `smoothedMcp`, `smoothedIp`, `smoothedPalmRotationDisplay`), plus the `currentHandedness`/`handednessFlipCount` diagnostic and its `hands[opposite]` check, which can no longer fire now that there's no per-frame label to flip. Stale doc comments referencing the removed smoothers were updated to point at the new upstream filter instead.
+
+### Tuning surface added to `flexion-sweep`
+
+Added live-tunable inputs for `minCutoff`, `beta`, `derivativeCutoff`, and `maxGapSeconds` (alongside the existing handedness/session-duration controls), wired into `createDetector(handedness, filterOptions)` -- `detector.ts`'s constructor and default-export factory both take an optional `LandmarkFilterOptions`, applied identically to both landmark-set filters. `flexion-sweep` is a natural place to tune from: it already runs a slow palm-angle sweep with live confidence/ROM/DIP-PIP readouts to judge the effect against, continuing this doc's "live-tune, don't guess" practice (Tests 6/7's thresholds, the thumb-CMC guard's several parameters) rather than trusting first-principles defaults.
+
+**One caveat surfaced, not yet resolved:** `beta`'s effective strength differs between the two filtered landmark sets, since `speed = Δvalue/Δt` and the two sets are in different units -- `keypoints` is image-normalized (~0-1 range), `keypoints3D` is MediaPipe's world-landmark meters (~±0.1 range). The same `beta` value produces a very different effective speed-response in each, so a beta tuned by eye against the (2D) overlay isn't necessarily well-tuned for the 3D angles the actual measurements come from.
+
+Also added: numeric-display and table refresh throttling on `flexion-sweep`, tied to `1/minCutoff` seconds, so the on-screen numbers (palm angle, thumb depth sign, confidence, the bin/DIP-PIP tables) change at roughly the rate the filter itself considers "real" motion rather than repainting at full frame rate. Underlying capture (which bin a frame lands in, ROM extrema) is computed from the live per-frame value regardless of the display throttle -- only the repaint rate is affected, not what gets recorded.
+
+### Live-tuned defaults
+
+User tuned `minCutoff`/`beta` against real capture on `flexion-sweep` and set new defaults: **`minCutoff: 2 Hz`, `beta: 0.1`** (up from the initial untuned guesses of 0.8/0.02), promoted into `landmarkFilter.ts`'s `DEFAULT_OPTIONS` as the new baseline for every capture page. `derivativeCutoff` (1) and `maxGapSeconds` (0.15s) are untouched from their original starting values.
+
+116/118 -- 124/124 tests pass throughout (`landmarkFilter.test.ts`'s 6 new cases included), `npm run check` clean at every step.
+
+### Still open
+
+- The `minCutoff: 2`/`beta: 0.1` defaults are live-tuned for _visual smoothness_ against the overlay, not yet validated against a quantified re-run of an earlier test (e.g. Test 8's DIP/PIP coupling R² values, or Test 4's axis-fit confidence) to see whether filtering measurably changes those numbers, and if so in which direction. Worth a rerun once there's time, the same way the `makeBasis()` fix's blast-radius note (2026-09-02) flagged for that change.
+- The beta-units caveat above (2D vs. 3D landmark sets) is unresolved -- worth checking whether the two filtered signals need independently-tunable beta values rather than one shared value, once there's a concrete case where they visibly disagree.
+- Filtering doesn't change any of this doc's still-open findings about _where_ MediaPipe's signal itself is unreliable (dorsal-view noise, wrist-as-CMC-pivot, thumb tracking being the noisiest joint, world-landmark basis drift under whole-arm rotation) -- it only reduces frame-to-frame jitter on top of whatever signal (real or biased) is actually there. The standing plan below is otherwise unaffected except where noted.
+
+---
+
 ## Plan: handedness and hand-plane-normal stability, before further thumb-movement work
+
+**Amended 2026-09-04:** item 2 below is superseded for this project's actual scope, not completed as originally framed. Scanning was scoped to one hand per session (see the entry above), which removes per-frame handedness classification from the pipeline entirely rather than stabilizing it -- `detector.ts` now assigns a session-declared handedness unconditionally instead of reading MediaPipe's per-frame label. This resolves the practical problem (handPlaneNormal() can no longer flip mid-session) without building the hold/hysteresis mechanism item 2 describes. That mechanism would still be needed if this project ever supports tracking two hands in one session -- not currently planned. Items 3-5 (re-check handPlaneNormal, fall back to fingerCurlAgreesWithNormal if needed, then resume Tests 10/11) still apply and are unaffected by this amendment.
 
 Standing back from the play-by-play above: this session's real finding isn't "the normal was backwards," it's that **this whole test suite has been building on MediaPipe Hands outputs — handedness, world-landmark depth, the wrist-as-pivot assumption already retracted in Group 3 — without first mapping out where each one is actually reliable.** Each limitation so far has been discovered by accident, mid-test, after work was already built on top of the assumption it would hold (the landmark-1 basis circularity, the wrong-bone CMC pivot, now handedness stability). The user's stated goal going forward: build the real hand-scanning process and UI with these limitations known and accounted for up front, so `scan_procedure.md` can carry an actual estimate of scan error instead of discovering each failure mode after the fact.
 
 Concretely, before resuming Tests 10/11 (thumb-CMC axis fit, conjunct coupling, occlusion guard) or any further refinement of the thumb movement model:
 
-1. **Test whether `hand.score` predicts handedness flips.** Log `score` alongside `handednessFlipCount` events through the same problematic sweep (thumb toward/away, wrist flexion/extension) on this rig. This is the immediate next test named above.
-2. **Build and live-tune a handedness-stabilization mechanism**, informed by (1) — most likely a short hold/hysteresis on the classified label (same category of fix as Test 6's still-window and Test 7's peak hysteresis: separate noise-rejection from the raw per-frame signal, don't trust any single frame). Verify it against synthetic data first, then live, per this doc's established pattern.
+1. ~~Test whether `hand.score` predicts handedness flips.~~ **Answered 2026-09-03: no** — `score` stays in the 90s even when tracking is visibly bad, no observed dip around flips. Not a usable early-warning signal.
+2. **Build and live-tune a handedness-stabilization mechanism**, blind to `hand.score` per (1) — a short hold/hysteresis purely on the classified label itself (same category of fix as Test 6's still-window and Test 7's peak hysteresis: separate noise-rejection from the raw per-frame signal, don't trust any single frame). Verify it against synthetic data first, then live, per this doc's established pattern.
 3. **Re-run the `handPlaneNormal` sweep test** (thumb toward/away, wrist flexion/extension, with the arrow/insets already built in `thumb-cmc`) with handedness stabilized, to check whether that alone fixes the sign, or whether a residual issue remains once handedness is no longer a confound.
 4. **If `handPlaneNormal` still isn't reliable after (3)**, `fingerCurlAgreesWithNormal` (or a similar anatomy-grounded check, generalized beyond middle/ring-finger flexion) becomes the load-bearing signal for "which side is the palm on," not a diagnostic on the side — and `scan_procedure.md`'s design should account for that rather than assuming a clean geometric normal is always available.
 5. **Only then**, resume Tests 10/11 and further thumb-CMC/thumb-movement modeling — on a foundation where handedness and orientation-sign are known-stable (or their actual failure rate is known and designed around), not assumed.

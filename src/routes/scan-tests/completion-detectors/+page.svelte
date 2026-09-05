@@ -109,7 +109,7 @@
 
     try {
       detector?.dispose()
-      detector = await createDetector()
+      detector = await createDetector(handedness)
       await setupCamera()
     } catch (e) {
       error = e as Error

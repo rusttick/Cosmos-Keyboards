@@ -28,7 +28,7 @@
   $: clipped = mag > 1
 </script>
 
-<div class="flex flex-col items-center gap-1 select-none">
+<div class="select-none">
   <svg width={size} height={size} viewBox="0 0 {size} {size}">
     <circle
       cx={size / 2}
@@ -59,7 +59,4 @@
       stroke-width="2"
     />
   </svg>
-  <span class="text-xs" class:text-emerald-400={good} class:text-amber-400={!good}>
-    {totalDeg.toFixed(1)}&deg; off level
-  </span>
 </div>

@@ -5,6 +5,7 @@
     fingerCurlAgreesWithNormal,
     type Handedness,
     handPlaneNormal,
+    palmAngleDeg,
     type PalmTilt,
     palmTilt,
   } from '../lib/orientation'
@@ -16,6 +17,7 @@
   } from '../lib/overlay'
   import PalmBubble from '../lib/PalmBubble.svelte'
   import { handOrientation, type Hand, type Joint } from '$lib/hand'
+  import { DEFAULT_ONE_EURO_OPTIONS } from '../lib/landmarkFilter'
   import { Matrix4, Quaternion, Vector3 } from 'three'
   import {
     fitConjunctCoupling,
@@ -31,18 +33,33 @@
   // and read ~10-15deg -- correct, not backwards. So the sign is fine at rest, on this rig, with this
   // formula; a blanket flip would have made the rest reading wrong (~165-170deg) to fix a problem that
   // only shows up mid-sweep. The bug isn't a constant offset -- something flips it partway through
-  // certain rotations specifically. Leading hypothesis: MediaPipe's handedness classification (Left/
-  // Right) is a separate, imperfect prediction from landmark tracking, and handPlaneNormal() negates based
-  // on it -- a brief misclassification during a hard, self-occluding rotation would flip the normal for
-  // exactly those frames while leaving rest (and easy poses) correct. `handedness`/`score` are now
-  // shown live (below) to check this directly: watch whether handedness changes during the same
-  // rotations that showed the arrow backwards.
+  // certain rotations specifically. Root cause: MediaPipe's handedness classification (Left/Right) is
+  // a separate, imperfect per-frame prediction from landmark tracking, and handPlaneNormal() negates
+  // based on it -- a brief misclassification during a hard, self-occluding rotation flips the normal
+  // for exactly those frames while leaving rest (and easy poses) correct. Confirmed live (see
+  // docs/thumbs/test_results.md, 2026-09-02/09-03) via a flip counter that climbed with real movement.
+  // Now moot for a different reason: scanning procedures are scoped to one hand per session, so
+  // detector.ts fixes maxNumHands to 1 and always assigns the procedure's declared handedness rather
+  // than trusting MediaPipe's per-frame label -- there's no more per-frame classification for
+  // handPlaneNormal() to read, so it can't flip mid-session. The diagnostic that used to live here
+  // (currentHandedness/handednessFlipCount) was removed since it can no longer fire.
 
   type Mode = 'outer' | 'freeform'
-  type Phase = 'idle' | 'recording'
+  // Explicit pre-recording pipeline so pressing Start with the mouse (right hand still on it) and then
+  // moving the target hand into frame afterward is a supported flow, not a race against a Start button
+  // that immediately began capturing: 'waiting-for-hand' until anything is detected, 'settling' for a
+  // few consecutive valid frames once it is (guards against the detector's first, least-stable lock),
+  // 'leveling' to run the auto-level calibration against that now-stable hand, then 'recording' for the
+  // real capture. Each state is shown live as an overlay on the video itself (below).
+  type Phase = 'idle' | 'waiting-for-hand' | 'settling' | 'leveling' | 'recording'
 
   const STALL_RESET_SECONDS = 3
   const STATS_UPDATE_EVERY = 10
+  // How many consecutive score-gated frames count as "steady" before leveling/recording begins --
+  // small on purpose, this is just a lock-stability gate, not a statistical sample (that's what
+  // CALIBRATION_FRAMES/START_REFERENCE_FRAMES are for downstream).
+  const SETTLE_FRAMES = 10
+  const PHASE_SCORE_GATE = 0.7
 
   let video: HTMLVideoElement
   let overlayCanvas: HTMLCanvasElement
@@ -71,10 +88,24 @@
   let confidenceThreshold = 0.7
   let minHealthyYield = 0.8
 
+  // Numeric displays refresh at this rate rather than every frame -- tied to the One Euro filter's own
+  // min cutoff (this page has no tuning UI of its own, so it reads landmarkFilter.ts's canonical
+  // default directly), matching the same throttling added to flexion-sweep. See
+  // docs/thumbs/test_results.md's denoising discussion. Underlying capture/logic (guard pushes,
+  // calibration averaging, running max tracking, phase transitions) always uses the live per-frame
+  // value regardless of this -- only how often the page repaints numbers is affected.
+  const displayRefreshIntervalSeconds = 1 / DEFAULT_ONE_EURO_OPTIONS.minCutoff
+  let lastDisplayUpdate = 0
+
   let phase: Phase = 'idle'
   let error: Error | undefined
   let startTime = 0
   let elapsed = 0
+  let settleCount = 0
+  // sessionDuration/the auto-stop check measure from here, not from Start -- otherwise time spent
+  // waiting-for-hand/settling/leveling (which can be arbitrarily long if you're getting into position)
+  // would eat into the recording budget.
+  let recordingStartElapsed = 0
   let currentScore: number | undefined
   let lastFrameAt: number | undefined
   let rid: number
@@ -85,13 +116,17 @@
   // another projection of the same landmarks -- see fingerCurlAgreesWithNormal's doc comment.
   // undefined when neither finger is flexed enough to give a usable signal.
   let currentCurlCheck: number | undefined
-  // MediaPipe's own handedness classification, re-run every frame -- a separate, imperfect prediction
-  // from landmark tracking. handPlaneNormal() negates based on it, so a brief misclassification during a
-  // hard/self-occluding pose would flip the normal for exactly those frames. Tracked here (plus a
-  // running count of how many times it's changed mid-recording) to check that hypothesis directly
-  // against the arrow-points-backwards finding -- see the note above the script's top.
-  let currentHandedness: 'Left' | 'Right' | undefined
-  let handednessFlipCount = 0
+  // Live orientation readout -- lets a session be positioned at a chosen static angle (0deg=palm-facing,
+  // 90deg=lateral) before recording, and re-checked mid-recording, rather than only ever inferring
+  // orientation after the fact from the rotation-vs-flexion CSV. Independent of currentPalmRotation
+  // (which measures change-from-start, i.e. whole-arm rotation contamination, not absolute orientation).
+  let currentPalmAngle: number | undefined
+  // Live thumb-angle readout -- the same smoothed swept-distance signal the guard/max already tracks
+  // (sweepMagnitude, smoothed), just exposed per-frame instead of only ever seeing the final max. Lets
+  // "does the thumb angle move when I flex the thumb, and does it also move when I only rotate the palm"
+  // be watched directly, at whatever static palmAngle the hand is currently held at -- the isolation
+  // experiment this page is for.
+  let currentThumbAngle: number | undefined
 
   // --- Palm-tilt calibration --------------------------------------------------------------------
   // Live capture found a consistent ~10deg baseline offset in the bubble/totalDeg reading at true
@@ -106,6 +141,11 @@
   // --- Outer sweep (Phase 6a) state -----------------------------------------------------------
   const START_REFERENCE_FRAMES = 5
   let outerHistory: Hand[] = []
+  // Parallel to outerHistory -- elapsed-seconds timestamp for each pushed frame, kept so the
+  // rotation-vs-flexion analysis table (below) can show a real per-frame time series after a run
+  // stops, instead of the live per-frame readouts (currentPalmRotation etc.) that vanish the moment
+  // recording ends and are only ever seen one number at a time.
+  let outerElapsed: number[] = []
   // Reference is bone[1] (CMC-landmark -> MCP-landmark, the actual first metacarpal, the rigid body
   // that pivots at the CMC) -- not bone[0] (wrist -> thumb-CMC-landmark). MediaPipe models the wrist
   // as a zero-width point, so bone[0] sits too close to the CMC's own pivot to carry much real
@@ -121,8 +161,9 @@
   // methodology note.
   let startOrientationBuffer: Quaternion[] = []
   let startOrientation: Quaternion | undefined
-  let currentPalmRotation = 0 // raw per-frame value -- feeds palmRotationMax, not shown directly
-  let displayedPalmRotation = 0 // heavily smoothed, for a readable live number (raw jitters too fast)
+  // Landmarks are now despiked/One-Euro filtered upstream (detector.ts), so this no longer needs its
+  // own page-local smoothing to be readable -- see docs/thumbs/test_results.md's denoising discussion.
+  let currentPalmRotation = 0
   let palmRotationMax = 0
   let outerGuard: OcclusionGuardedGrowthPlateau | undefined
   let outerStatus: ThumbSweepStatus = 'in-progress'
@@ -136,12 +177,17 @@
   let mcpMax = -Infinity
   let ipMin = Infinity
   let ipMax = -Infinity
-  // A single-frame MediaPipe glitch (not uncommon during fast or unusual thumb configurations)
-  // otherwise permanently corrupts an unbounded running min/max -- the same lesson already applied to
-  // the outer-sweep proxy (see smoothedProxy above), now applied here too after live capture showed
-  // physiologically implausible ROM spans (100°+) consistent with exactly this failure mode.
-  let smoothedMcp = makeSmoother()
-  let smoothedIp = makeSmoother()
+
+  $: phaseBadge =
+    phase === 'waiting-for-hand'
+      ? { text: 'Waiting for hand…', color: 'bg-amber-500' }
+      : phase === 'settling'
+      ? { text: `Settling… ${settleCount}/${SETTLE_FRAMES}`, color: 'bg-amber-500' }
+      : phase === 'leveling'
+      ? { text: `Auto-leveling… ${calibrationBuffer.length}/${CALIBRATION_FRAMES}`, color: 'bg-sky-500' }
+      : phase === 'recording'
+      ? { text: 'Recording', color: 'bg-emerald-500' }
+      : undefined
 
   $: noHandDetected =
     phase !== 'idle' && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
@@ -172,16 +218,17 @@
       : `finger-curl check (unverified): normal ${
           currentCurlCheck > 0 ? 'AGREES with' : 'DISAGREES with'
         } curl direction (dot=${currentCurlCheck.toFixed(3)})`
-  $: handednessSummary =
-    `handedness classification: selected ${handedness}, currently reading ${currentHandedness ?? '—'}` +
-    (handednessFlipCount > 0
-      ? ` -- FLIPPED to the other label ${handednessFlipCount}x this recording`
-      : ' -- no flips seen this recording')
 
   $: outerSummary = [
     `outer sweep: ${handedness}, ${outerHistory.length} frames`,
     `status: ${outerStatus}${outerGuard ? ` (max swept: ${outerGuard.max.toFixed(1)}°)` : ''}`,
-    `[diagnostic] palm/forearm rotation from start: ${displayedPalmRotation.toFixed(
+    `current thumb angle (swept distance from start): ${
+      currentThumbAngle !== undefined ? currentThumbAngle.toFixed(1) + '°' : '—'
+    }`,
+    `current palm angle (0=palm-facing, 90=lateral, 180=palm-away): ${
+      currentPalmAngle !== undefined ? currentPalmAngle.toFixed(1) + '°' : '—'
+    }`,
+    `[diagnostic] palm/forearm rotation from start: ${currentPalmRotation.toFixed(
       1
     )}° (max: ${palmRotationMax.toFixed(1)}°) -- should stay near 0 if only the CMC is moving`,
     cmcJoint
@@ -192,11 +239,13 @@
     calibrationSummary,
     currentTiltSummary,
     currentCurlCheckSummary,
-    handednessSummary,
   ].join('\n')
 
   $: freeformSummary = [
     `freeform sweep: ${handedness}, ${freeformHistory.length} frames`,
+    `current palm angle (0=palm-facing, 90=lateral, 180=palm-away): ${
+      currentPalmAngle !== undefined ? currentPalmAngle.toFixed(1) + '°' : '—'
+    }`,
     conjunctFit
       ? `conjunctCoupling: aCoeff=${conjunctFit.aCoeff.toFixed(3)}, bCoeff=${conjunctFit.bCoeff.toFixed(
           3
@@ -211,7 +260,6 @@
     calibrationSummary,
     currentTiltSummary,
     currentCurlCheckSummary,
-    handednessSummary,
   ].join('\n')
 
   /** Unsigned magnitude for "how far has the CMC swept from its start position" -- total angular
@@ -226,27 +274,6 @@
   function sweepMagnitude(hand: Hand, start: Vector3): number {
     return (start.angleTo(hand.limbs.thumb[1]) * 180) / Math.PI
   }
-
-  /** A brief moving average, still worth keeping even with a magnitude/growth-based guard: without it,
-   * a single noisy MediaPipe frame that happens to spike above the true value gets baked into the
-   * running max permanently (the guard only ever raises its max, never lowers it), making genuine
-   * convergence harder to reach than it should be. */
-  const SMOOTHING_WINDOW = 5
-  /** A small moving-average smoother, factored out so both the outer-sweep proxy and the freeform
-   * MCP/IP byproduct tracking (below) can each keep their own independent buffer rather than sharing
-   * one -- they're unrelated signals recorded in different modes. */
-  function makeSmoother(window = SMOOTHING_WINDOW) {
-    const buffer: number[] = []
-    return (raw: number) => {
-      buffer.push(raw)
-      if (buffer.length > window) buffer.shift()
-      return buffer.reduce((a, b) => a + b, 0) / buffer.length
-    }
-  }
-  let smoothedProxy = makeSmoother()
-  // Much heavier window than the default -- this is purely for a human-readable live number, not fed
-  // into anything else, so trading responsiveness for readability is fine (~0.7s at 30fps).
-  let smoothedPalmRotationDisplay = makeSmoother(20)
 
   async function setupCamera() {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('No camera access available')
@@ -267,19 +294,28 @@
 
   async function start() {
     error = undefined
-    currentHandedness = undefined
-    handednessFlipCount = 0
+    // Auto-level runs as its own phase below (waiting-for-hand -> settling -> leveling -> recording),
+    // once a hand is actually detected and steady -- not blind-triggered here, since at the moment
+    // Start is clicked the target hand may not even be in frame yet (e.g. Start was clicked with the
+    // mouse using the same hand that's about to move into position). Without this the auto-level
+    // buffer would fill with garbage/absent-hand frames instead of the real starting pose. The button
+    // still works mid-recording afterward, for an explicit re-calibration against a deliberately-held
+    // truer level pose.
+    calibrationBuffer = []
+    calibrationReference = undefined
+    calibrating = false
+    settleCount = 0
+    lastDisplayUpdate = 0
     if (mode === 'outer') {
       outerHistory = []
+      outerElapsed = []
       startFrameBuffer = []
-      smoothedProxy = makeSmoother()
       startMetacarpal = undefined
       startOrientationBuffer = []
       startOrientation = undefined
       currentPalmRotation = 0
-      displayedPalmRotation = 0
-      smoothedPalmRotationDisplay = makeSmoother(20)
       palmRotationMax = 0
+      currentThumbAngle = undefined
       outerGuard = new OcclusionGuardedGrowthPlateau({
         windowSeconds: growthWindowSeconds,
         convergenceThreshold,
@@ -301,15 +337,13 @@
       mcpMax = -Infinity
       ipMin = Infinity
       ipMax = -Infinity
-      smoothedMcp = makeSmoother()
-      smoothedIp = makeSmoother()
     }
     currentScore = undefined
     lastFrameAt = undefined
     staleResetAttempted = false
     try {
       detector?.dispose()
-      detector = await createDetector()
+      detector = await createDetector(handedness)
       await setupCamera()
     } catch (e) {
       error = e as Error
@@ -317,7 +351,7 @@
       return
     }
 
-    phase = 'recording'
+    phase = 'waiting-for-hand'
     startTime = performance.now()
     rid = requestAnimationFrame(loop)
   }
@@ -337,6 +371,13 @@
       staleResetAttempted = true
       detector!.reset()
     }
+    // Losing the hand partway through settling/leveling means "steady" wasn't real -- drop back to
+    // waiting-for-hand rather than letting a stale streak carry through a gap.
+    if ((phase === 'settling' || phase === 'leveling') && staleFor > 1) {
+      phase = 'waiting-for-hand'
+      settleCount = 0
+      calibrationBuffer = []
+    }
 
     detector!
       .estimateHands(video, { flipHorizontal: true })
@@ -345,26 +386,61 @@
         if (!hand) {
           currentTilt = undefined
           currentCurlCheck = undefined
-          // The selected hand vanished this frame -- if MediaPipe instead reported the *other* label,
-          // that's direct evidence of a handedness misclassification (the same physical hand briefly
-          // relabeled), not just a missed detection.
-          const opposite = handedness === 'Left' ? 'Right' : 'Left'
-          if (hands[opposite]) {
-            handednessFlipCount++
-            currentHandedness = opposite
-          }
+          currentPalmAngle = undefined
           return
         }
-        currentScore = hand.score
         lastFrameAt = elapsed
         staleResetAttempted = false
         drawHandOverlay(overlayCanvas, hand.hand.keypoints)
-        currentTilt = palmTilt(hand, calibrationReference)
-        currentCurlCheck = fingerCurlAgreesWithNormal(hand)
-        currentHandedness = hand.handedness as 'Left' | 'Right'
-        drawPalmNormalOverlay(overlayCanvas, hand.hand.keypoints, currentTilt)
-        drawVectorSpaceTriangle(overlayCanvas, hand, currentTilt)
-        drawVectorSpaceTopView(overlayCanvas, hand, currentTilt)
+
+        // Live (unthrottled) values -- used for overlay drawing and any capture logic below. Only the
+        // *displayed* copies further down are refreshed at the throttled rate.
+        const tilt = palmTilt(hand, calibrationReference)
+        drawPalmNormalOverlay(overlayCanvas, hand.hand.keypoints, tilt)
+        drawVectorSpaceTriangle(overlayCanvas, hand, tilt)
+        drawVectorSpaceTopView(overlayCanvas, hand, tilt)
+
+        const dueForDisplay = elapsed - lastDisplayUpdate >= displayRefreshIntervalSeconds
+        if (dueForDisplay) {
+          lastDisplayUpdate = elapsed
+          currentScore = hand.score
+          currentPalmAngle = palmAngleDeg(hand)
+          currentTilt = tilt
+          currentCurlCheck = fingerCurlAgreesWithNormal(hand)
+        }
+
+        if (phase === 'waiting-for-hand') {
+          if (hand.score >= PHASE_SCORE_GATE) {
+            phase = 'settling'
+            settleCount = 0
+          }
+          return
+        }
+
+        if (phase === 'settling') {
+          if (hand.score >= PHASE_SCORE_GATE) {
+            settleCount++
+            if (settleCount >= SETTLE_FRAMES) {
+              phase = 'leveling'
+              calibrationBuffer = []
+            }
+          }
+          return
+        }
+
+        if (phase === 'leveling') {
+          if (hand.score >= PHASE_SCORE_GATE) {
+            calibrationBuffer.push(handPlaneNormal(hand))
+            if (calibrationBuffer.length >= CALIBRATION_FRAMES) {
+              calibrationReference = calibrationBuffer
+                .reduce((acc, v) => acc.add(v), new Vector3())
+                .normalize()
+              phase = 'recording'
+              recordingStartElapsed = elapsed
+            }
+          }
+          return
+        }
 
         if (calibrating && hand.score >= 0.7) {
           calibrationBuffer.push(handPlaneNormal(hand))
@@ -403,6 +479,7 @@
             }
             outerHistory.push(hand)
             outerHistory = outerHistory
+            outerElapsed.push(elapsed)
             return
           }
 
@@ -410,26 +487,29 @@
           // needs to see confidence drop to distinguish a genuine plateau from occlusion, so gating
           // frames out here (the way every other page does) would hide exactly the signal it's
           // looking for.
-          const sweptDeg = smoothedProxy(sweepMagnitude(hand, startMetacarpal))
+          const sweptDeg = sweepMagnitude(hand, startMetacarpal)
           outerGuard!.push(elapsed, sweptDeg, hand.score)
           outerStatus = outerGuard!.status()
 
           // Diagnostic: whole-hand/forearm orientation change from start, not wired into the guard --
-          // see the note by its declaration.
-          currentPalmRotation = (startOrientation!.angleTo(handOrientation(hand)) * 180) / Math.PI
-          if (currentPalmRotation > palmRotationMax) palmRotationMax = currentPalmRotation
-          displayedPalmRotation = smoothedPalmRotationDisplay(currentPalmRotation)
+          // see the note by its declaration. Computed live every frame regardless of the display
+          // throttle so palmRotationMax never misses a peak between throttled display refreshes.
+          const palmRotationDeg = (startOrientation!.angleTo(handOrientation(hand)) * 180) / Math.PI
+          if (palmRotationDeg > palmRotationMax) palmRotationMax = palmRotationDeg
+          if (dueForDisplay) {
+            currentThumbAngle = sweptDeg
+            currentPalmRotation = palmRotationDeg
+          }
 
           outerHistory.push(hand)
           outerHistory = outerHistory
+          outerElapsed.push(elapsed)
         } else {
           if (hand.score < 0.7) return // freeform's own fits already assume confidence-gated input
           freeformHistory.push(hand)
           freeformHistory = freeformHistory
 
-          const [rawMcp, rawIp] = thumbMcpIpAngles(hand)
-          const mcp = smoothedMcp(rawMcp)
-          const ip = smoothedIp(rawIp)
+          const [mcp, ip] = thumbMcpIpAngles(hand)
           if (mcp < mcpMin) mcpMin = mcp
           if (mcp > mcpMax) mcpMax = mcp
           if (ip < ipMin) ipMin = ip
@@ -441,7 +521,7 @@
       .catch((e) => console.error(e))
       .finally(() => {
         if (phase === 'idle') return
-        if (phase === 'recording' && elapsed >= sessionDuration) {
+        if (phase === 'recording' && elapsed - recordingStartElapsed >= sessionDuration) {
           stop()
         } else {
           rid = requestAnimationFrame(loop)
@@ -495,6 +575,50 @@
     calibrationReference = undefined
   }
 
+  /** Per-frame time series for the rotation-vs-flexion question, computed once a run stops (not live --
+   * this is a full-history recompute, not something to redo every animation frame) and shown as
+   * selectable text so it can be copy-pasted directly rather than needing a file round-trip. Live
+   * readouts (currentPalmRotation, the smoothed sweep proxy) only ever show one instant and vanish the
+   * moment a run stops -- this is what lets a whole run be inspected after the fact.
+   *
+   * Three angle columns, each "how far has bone1 rotated from its start-of-run direction":
+   * - rawBoneAngleDeg: bone1's raw (camera-space, uncorrected) direction -- includes whole-arm rotation.
+   * - basisRelativeAngleDeg: hand.limbs.thumb[1], i.e. the actual production signal (bone1 expressed in
+   *   that frame's own basis, which is meant to cancel whole-hand rotation).
+   * There's no separate "explicit correction via handOrientation()" column: handOrientation() is derived
+   * from the identical per-frame basis fit, so applying it to the raw vector by hand reproduces
+   * basisRelativeAngleDeg exactly -- it isn't a different correction, just the same one written out
+   * longhand. A genuinely different correction (e.g. a temporally-smoothed orientation estimate instead
+   * of trusting each frame's own noisy 3-point fit) is a real next experiment, not implemented here yet.
+   * palmRotationDeg is the same handOrientation-based diagnostic already shown live, included per-frame
+   * so it can be checked directly against how much rawBoneAngleDeg and basisRelativeAngleDeg move
+   * together with it. */
+  function computeRotationAnalysis(history: Hand[], elapsedHistory: number[]): string {
+    if (history.length < 2) return ''
+    const first = history[0]
+    const rawStart = new Vector3().subVectors(first.vectors[2], first.vectors[1])
+    const basisStart = first.limbs.thumb[1]
+    const orientStart = handOrientation(first)
+
+    const header = 't,score,palmRotationDeg,rawBoneAngleDeg,basisRelativeAngleDeg'
+    const rows = history.map((h, i) => {
+      const raw = new Vector3().subVectors(h.vectors[2], h.vectors[1])
+      const palmRotationDeg = (orientStart.angleTo(handOrientation(h)) * 180) / Math.PI
+      const rawAngleDeg = (rawStart.angleTo(raw) * 180) / Math.PI
+      const basisAngleDeg = (basisStart.angleTo(h.limbs.thumb[1]) * 180) / Math.PI
+      return [
+        elapsedHistory[i].toFixed(2),
+        h.score.toFixed(3),
+        palmRotationDeg.toFixed(2),
+        rawAngleDeg.toFixed(2),
+        basisAngleDeg.toFixed(2),
+      ].join(',')
+    })
+    return [header, ...rows].join('\n')
+  }
+  $: rotationAnalysisCsv =
+    mode === 'outer' && phase === 'idle' ? computeRotationAnalysis(outerHistory, outerElapsed) : ''
+
   onDestroy(() => {
     if (phase !== 'idle') cancelAnimationFrame(rid)
     teardownCamera()
@@ -517,11 +641,13 @@
     an isolated thumb sweep on <code>flexion-sweep</code> (pick "thumb" as the finger there).
   </p>
   <p class="mb-6 text-sm text-amber-400">
-    <strong
-      >Keep the palm facing the camera throughout, and avoid pointing the thumb toward the camera.</strong
-    > Pointing the thumb toward the camera inflates the swept-distance number with depth-estimation noise
-    rather than real motion. See the methodology note below for why the measurement itself also changed bone
-    this session.
+    <strong>Avoid pointing the thumb toward the camera</strong> -- that specifically inflates the swept-distance
+    number with depth-estimation noise rather than real motion. Beyond that, palm-facing is not a hard requirement:
+    any static angle between palm-facing (0°) and thumb-away (~90°) is worth trying. Use the live "palm angle"
+    / "thumb angle" readouts below to position at a chosen angle, then flex only the thumb and separately
+    rotate only the wrist/forearm to see how much each one moves the thumb-angle reading at that angle --
+    the angle where thumb motion moves it a lot and forearm rotation moves it little is the one to use as
+    the real capture reference, not necessarily 0°.
   </p>
 
   {#if error}
@@ -640,37 +766,11 @@
       bind:this={overlayCanvas}
       class="absolute inset-0 w-full h-full object-contain pointer-events-none"
     />
-    {#if currentTilt}
-      <div class="absolute top-2 right-2 bg-black/60 rounded-lg p-2 flex flex-col items-center gap-1">
-        <PalmBubble tiltX={currentTilt.x} tiltY={currentTilt.y} totalDeg={currentTilt.totalDeg} />
-        <span class="text-xs text-gray-300 font-mono">
-          normal z: {currentTilt.z.toFixed(3)}
-        </span>
-        {#if currentCurlCheck !== undefined}
-          <span
-            class="text-xs font-mono"
-            class:text-emerald-400={currentCurlCheck > 0}
-            class:text-red-400={currentCurlCheck < 0}
-          >
-            curl check: {currentCurlCheck > 0 ? 'agrees' : 'DISAGREES'} ({currentCurlCheck.toFixed(3)})
-          </span>
-        {/if}
-        <span class="text-xs font-mono" class:text-amber-400={handednessFlipCount > 0}>
-          handedness: {currentHandedness ?? '—'} (selected {handedness}){handednessFlipCount > 0
-            ? ` -- flipped ${handednessFlipCount}x!`
-            : ''}
-        </span>
-        <span
-          class="text-xs"
-          class:text-emerald-400={!!calibrationReference}
-          class:text-gray-500={!calibrationReference}
-        >
-          {calibrating
-            ? `calibrating... ${calibrationBuffer.length}/${CALIBRATION_FRAMES}`
-            : calibrationReference
-            ? 'calibrated'
-            : 'raw (uncalibrated)'}
-        </span>
+    {#if phaseBadge}
+      <div
+        class="absolute top-2 left-2 {phaseBadge.color} text-black text-sm font-semibold px-3 py-1 rounded-full shadow-lg"
+      >
+        {phaseBadge.text}
       </div>
     {/if}
   </div>
@@ -723,14 +823,39 @@
   <div class="text-sm text-gray-300 mb-4">
     <p>
       Phase: <span class="font-semibold text-white">{phase}</span>
-      {#if phase !== 'idle'}(loop tick {loopTicks}, {elapsed.toFixed(1)}s / {sessionDuration}s){/if}
+      {#if phase === 'recording'}
+        (loop tick {loopTicks}, {(elapsed - recordingStartElapsed).toFixed(1)}s / {sessionDuration}s)
+      {:else if phase !== 'idle'}
+        (loop tick {loopTicks})
+      {/if}
     </p>
     <p class:text-amber-400={noHandDetected}>
       Current confidence: {currentScore !== undefined ? currentScore.toFixed(3) : '—'}
     </p>
+    <p class="text-xs text-gray-400">
+      Numeric displays refresh at ~{DEFAULT_ONE_EURO_OPTIONS.minCutoff.toFixed(2)} Hz ({displayRefreshIntervalSeconds.toFixed(
+        2
+      )}s between updates) -- tied to the One Euro min cutoff (this page has no tuning UI; see
+      flexion-sweep for that).
+    </p>
+    {#if currentPalmAngle !== undefined}
+      <p>
+        Palm angle (0°=palm-facing, 90°=lateral, 180°=palm-away): <span class="font-mono"
+          >{currentPalmAngle.toFixed(1)}°</span
+        >
+        -- position the hand here before starting a run to test isolation at this angle.
+      </p>
+    {/if}
+    {#if mode === 'outer' && currentThumbAngle !== undefined}
+      <p>
+        Thumb angle (swept distance from start): <span class="font-mono"
+          >{currentThumbAngle.toFixed(1)}°</span
+        >
+      </p>
+    {/if}
     {#if mode === 'outer' && startMetacarpal}
-      <p class:text-amber-400={displayedPalmRotation > 5}>
-        Palm/forearm rotation from start: {displayedPalmRotation.toFixed(1)}°{displayedPalmRotation > 5
+      <p class:text-amber-400={currentPalmRotation > 5}>
+        Palm/forearm rotation from start: {currentPalmRotation.toFixed(1)}°{currentPalmRotation > 5
           ? ' -- watch for whole-arm rotation, not just the thumb'
           : ''}
       </p>
@@ -743,12 +868,35 @@
     {/if}
   </div>
 
+  {#if currentTilt}
+    <div class="mb-4 flex items-center gap-3">
+      <PalmBubble tiltX={currentTilt.x} tiltY={currentTilt.y} totalDeg={currentTilt.totalDeg} />
+      <span class="text-xs text-gray-300 font-mono">
+        hand.score: {currentScore !== undefined ? currentScore.toFixed(3) : '—'}
+      </span>
+    </div>
+  {/if}
+
   <div class="mb-4">
     <h2 class="text-lg font-semibold mb-2">Result summary (select and copy this)</h2>
     <pre class="text-xs bg-black/40 rounded p-3 whitespace-pre-wrap select-all">{mode === 'outer'
         ? outerSummary
         : freeformSummary}</pre>
   </div>
+
+  {#if rotationAnalysisCsv}
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold mb-2">
+        Rotation-vs-flexion analysis, {outerHistory.length} frames (select and copy this)
+      </h2>
+      <p class="text-xs text-gray-400 mb-2">
+        CSV: t, score, palmRotationDeg (whole-hand rotation from start), rawBoneAngleDeg (bone1,
+        uncorrected), basisRelativeAngleDeg (bone1 in that frame's own basis -- the production signal).
+      </p>
+      <pre
+        class="text-xs bg-black/40 rounded p-3 max-h-64 overflow-y-auto whitespace-pre select-all">{rotationAnalysisCsv}</pre>
+    </div>
+  {/if}
 
   <details class="text-xs text-gray-500 mt-6">
     <summary class="cursor-pointer select-none">Methodology notes</summary>
@@ -792,9 +940,12 @@
         changing" idea `stillWindow.ts` already uses for stillness, applied to a running maximum instead.
         This needs no axis, no sign, and no clean per-rep shape: any exploratory motion, along either CMC
         axis or both at once, just grows the tracked max until the person stops finding new extremes, at
-        which point it plateaus and the guard converges. `smoothedProxy()`'s 5-frame moving average is
-        still used, now purely to keep a single noisy frame from permanently inflating the running max
-        (which only ever increases, never resets) rather than to feed a hysteresis threshold.
+        which point it plateaus and the guard converges. The page-local moving-average smoother that used
+        to sit here (keeping a single noisy frame from permanently inflating the running max, which only
+        ever increases and never resets) was removed once landmark filtering moved upstream into
+        `detector.ts` (despike + One Euro filter, applied before `makeHand()` -- see
+        docs/thumbs/test_results.md's denoising discussion) — a single bad frame is now rejected at the
+        source instead of smoothed out per-page after the fact.
       </p>
       <p>
         Not yet re-verified live. Growth window and growth threshold are both live-tunable above for
@@ -880,9 +1031,10 @@
         to the same failure mode already found and fixed for the outer-sweep proxy: a single MediaPipe tracking
         glitch (not uncommon at unusual or fast thumb configurations) produces one wildly wrong instantaneous
         angle, and since a running min/max latches onto any value forever, one bad frame permanently corrupts
-        the recorded ROM. Fixed the same way: `mcp`/`ip` are now each smoothed (5-frame moving average, via
-        the same `makeSmoother()` the outer-sweep proxy uses) before updating the running extrema, rather
-        than taking the raw per-frame value directly.
+        the recorded ROM. Originally fixed with a page-local 5-frame moving average on `mcp`/`ip` before updating
+        the running extrema; that page-local smoother was later removed once despike + One Euro filtering
+        moved upstream into `detector.ts`, which rejects the same kind of single-frame glitch at the landmark
+        level before `mcp`/`ip` are ever computed.
       </p>
       <p>
         <strong
@@ -895,12 +1047,22 @@
         this whole test suite keeps finding (see the toward-camera swept-distance note above). Also found
         a consistent <strong>~10° baseline offset</strong> at true physical level — the `[0, 5, 17]`
         triangle's normal isn't exactly the anatomical palm normal, so it never quite reads 0° even when
-        level, which is expected and not itself a bug. <strong>Calibrate level</strong> re-zeros against a
-        sampled reference instead of guessing that offset away: press it while holding the hand at a known-true-level
-        pose, hold still for the ~15-frame sample, and every reading (bubble, `normal z`, the numeric degrees)
-        becomes relative to that reference. This is a per-session/per-rig live calibration, not a hardcoded
-        constant — deliberately, so a future `scan3` implementation can run the same calibration as an early
-        step rather than baking today's ~10° into the model.
+        level, which is expected and not itself a bug.
+        <strong>Runs automatically now, as its own pipeline stage before recording</strong>, instead of
+        needing the button pressed first or blind-triggering the instant Start is clicked (which would
+        capture garbage if the target hand wasn't in frame yet — e.g. Start was clicked with the mouse
+        using that same hand). Pressing Start moves through <strong>waiting-for-hand</strong> (until
+        anything is detected) → <strong>settling</strong> (10 consecutive score-gated frames, so the
+        detector's first, least-stable lock isn't what gets leveled against) → <strong>leveling</strong>
+        (the ~15-frame calibration average, same as before) → <strong>recording</strong>, shown live as a
+        badge overlaid on the video itself. Before this, a session where nobody manually calibrated just
+        fell back to the raw camera-forward-relative reading for its entire duration, which read as "a
+        persistent offset, different every session" (see docs/thumbs/test_results.md).
+        <strong>Calibrate level</strong> still works mid-recording as an explicit re-calibration: press it
+        while deliberately holding a known-true-level pose to re-zero against that instead of trusting the
+        auto-captured start. This is a per-session/per-rig live calibration, not a hardcoded constant — deliberately,
+        so a future `scan3` implementation can run the same calibration as an early step rather than baking
+        today's ~10° into the model.
       </p>
     </div>
   </details>

@@ -20,7 +20,6 @@
   const BIN_COUNT = 9 // 0-10, 10-20, ..., 80-90 -- palm-facing (0deg) through full lateral (90deg)
   const CONFIDENCE_THRESHOLD = 0.7
   const STALL_RESET_SECONDS = 3
-  const STATS_UPDATE_EVERY = 10 // total accepted frames (across all bins) between refits
 
   // fitNorms/calculateJoints take an explicit bone-length reference ("means") purely to populate
   // Joint.length — irrelevant here, since only V/Vinv/degree/axisConfidence are used. A placeholder
@@ -57,18 +56,38 @@
   let handedness: Handedness = 'Right'
   let sessionDuration = 30
 
+  // One Euro / despike filter settings, live-tunable here for experimental tuning against real
+  // capture -- see landmarkFilter.ts's doc comments for what each one does and detector.ts for where
+  // they're applied (upstream of makeHand(), on both the 2D and 3D landmark sets). minCutoff/beta
+  // defaults are live-tuned (2026-09-04: 2 Hz / 0.1) and match landmarkFilter.ts's own; derivativeCutoff
+  // and maxGapSeconds are untouched from their original starting guesses.
+  let minCutoff = 2
+  let beta = 0.1
+  let derivativeCutoff = 1
+  let maxGapSeconds = 0.15
+
   let phase: Phase = 'idle'
   let error: Error | undefined
   let startTime = 0
   let elapsed = 0
-  let currentScore: number | undefined
   let lastFrameAt: number | undefined
-  let palmAngle: number | undefined
-  let thumbDepth: number | undefined
   let rid: number
   let loopTicks = 0
   let staleResetAttempted = false
   let totalAcceptedFrames = 0
+
+  // Numeric displays (palm angle, thumb depth, confidence) and the tables below refresh at this rate
+  // rather than every frame -- tied to the One Euro filter's own min cutoff so the on-screen numbers
+  // change at roughly the rate the filter itself considers "real" motion (below that, it's smoothing
+  // it away as noise), instead of visually jittering at full frame rate. The underlying capture (which
+  // frames land in which bin, ROM extrema) is unaffected -- every accepted frame is still counted;
+  // only how often the page repaints numbers from that data is throttled.
+  $: displayRefreshIntervalSeconds = minCutoff > 0 ? 1 / minCutoff : 0.1
+  let lastDisplayUpdate = 0
+  let lastTableRefresh = 0
+  let displayedScore: number | undefined
+  let displayedPalmAngle: number | undefined
+  let displayedThumbDepth: number | undefined
 
   let bins: Bin[] = Array.from({ length: BIN_COUNT }, (_, i) => makeBin(i))
   let dipPipFit: DipPipFit | undefined
@@ -118,9 +137,14 @@
 
   $: noHandDetected =
     phase !== 'idle' && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
+  // Display-only, derived from the throttled displayedPalmAngle -- the loop's own bin selection for
+  // capture (below) computes its own bin index from the live per-frame angle so throttling the display
+  // never affects which bin a frame is actually recorded into.
   $: currentBinIndex =
-    palmAngle !== undefined && palmAngle >= 0 && palmAngle < BIN_COUNT * BIN_WIDTH_DEG
-      ? Math.floor(palmAngle / BIN_WIDTH_DEG)
+    displayedPalmAngle !== undefined &&
+    displayedPalmAngle >= 0 &&
+    displayedPalmAngle < BIN_COUNT * BIN_WIDTH_DEG
+      ? Math.floor(displayedPalmAngle / BIN_WIDTH_DEG)
       : undefined
 
   function jointConfidence(j: Joint): number | undefined {
@@ -163,15 +187,17 @@
     bins = Array.from({ length: BIN_COUNT }, (_, i) => makeBin(i))
     dipPipFit = undefined
     totalAcceptedFrames = 0
-    currentScore = undefined
     lastFrameAt = undefined
-    palmAngle = undefined
-    thumbDepth = undefined
+    displayedScore = undefined
+    displayedPalmAngle = undefined
+    displayedThumbDepth = undefined
+    lastDisplayUpdate = 0
+    lastTableRefresh = 0
     lastKeypoints = undefined
     staleResetAttempted = false
     try {
       detector?.dispose()
-      detector = await createDetector()
+      detector = await createDetector(handedness, { minCutoff, beta, derivativeCutoff, maxGapSeconds })
       await setupCamera()
     } catch (e) {
       error = e as Error
@@ -205,20 +231,27 @@
       .then((hands) => {
         const hand = hands[handedness]
         if (!hand) return
-        currentScore = hand.score
         lastFrameAt = elapsed
         staleResetAttempted = false
-        palmAngle = palmAngleDeg(hand)
-        thumbDepth = thumbDepthSign(hand)
         lastKeypoints = hand.hand.keypoints
         drawHandOverlay(overlayCanvas, lastKeypoints)
 
-        if (
-          phase === 'recording' &&
-          hand.score >= CONFIDENCE_THRESHOLD &&
-          currentBinIndex !== undefined
-        ) {
-          const bin = bins[currentBinIndex]
+        // Live values used for capture -- computed every frame regardless of the display throttle
+        // below, so which bin a frame lands in is never affected by how often the page repaints.
+        const angle = palmAngleDeg(hand)
+        const depth = thumbDepthSign(hand)
+        const binIndex =
+          angle >= 0 && angle < BIN_COUNT * BIN_WIDTH_DEG ? Math.floor(angle / BIN_WIDTH_DEG) : undefined
+
+        if (elapsed - lastDisplayUpdate >= displayRefreshIntervalSeconds) {
+          lastDisplayUpdate = elapsed
+          displayedScore = hand.score
+          displayedPalmAngle = angle
+          displayedThumbDepth = depth
+        }
+
+        if (phase === 'recording' && hand.score >= CONFIDENCE_THRESHOLD && binIndex !== undefined) {
+          const bin = bins[binIndex]
           bin.history.push(hand)
 
           const newMin = [...bin.romMin]
@@ -236,10 +269,14 @@
           bins = bins
 
           totalAcceptedFrames++
-          if (totalAcceptedFrames % STATS_UPDATE_EVERY === 0) {
-            refitAll()
-            refitDipPip()
-          }
+        }
+
+        // Tables refresh at the same throttled rate as the numeric displays above -- the underlying
+        // bin/history data they're computed from is still updated every accepted frame regardless.
+        if (elapsed - lastTableRefresh >= displayRefreshIntervalSeconds) {
+          lastTableRefresh = elapsed
+          refitAll()
+          refitDipPip()
         }
       })
       .catch((e) => console.error(e))
@@ -321,6 +358,67 @@
         class="text-black rounded px-2 py-1"
       />
     </label>
+
+    <label class="flex flex-col gap-1">
+      <span class="text-sm">One Euro: min cutoff (Hz)</span>
+      <input
+        type="number"
+        min="0.01"
+        step="0.05"
+        bind:value={minCutoff}
+        disabled={phase !== 'idle'}
+        class="text-black rounded px-2 py-1"
+      />
+      <span class="text-xs text-gray-400">
+        Lower = heavier smoothing while nearly still. Scanning motion is slow, so this can be biased low.
+      </span>
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span class="text-sm">One Euro: beta</span>
+      <input
+        type="number"
+        min="0"
+        step="0.005"
+        bind:value={beta}
+        disabled={phase !== 'idle'}
+        class="text-black rounded px-2 py-1"
+      />
+      <span class="text-xs text-gray-400">
+        Higher = cutoff opens up more as speed increases (less lag on fast motion, less smoothing during
+        it).
+      </span>
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span class="text-sm">One Euro: derivative cutoff (Hz)</span>
+      <input
+        type="number"
+        min="0.01"
+        step="0.1"
+        bind:value={derivativeCutoff}
+        disabled={phase !== 'idle'}
+        class="text-black rounded px-2 py-1"
+      />
+      <span class="text-xs text-gray-400">Cutoff on the speed estimate itself. Rarely needs tuning.</span
+      >
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span class="text-sm">Gap reset (seconds)</span>
+      <input
+        type="number"
+        min="0.05"
+        step="0.05"
+        bind:value={maxGapSeconds}
+        disabled={phase !== 'idle'}
+        class="text-black rounded px-2 py-1"
+      />
+      <span class="text-xs text-gray-400">
+        A dropout longer than this resets despike/One-Euro state per landmark instead of filtering the
+        resumed signal against stale history.
+      </span>
+    </label>
   </div>
 
   <div class="mb-4 rounded overflow-hidden bg-black aspect-video relative">
@@ -356,16 +454,21 @@
       {#if phase !== 'idle'}(loop tick {loopTicks}, {elapsed.toFixed(1)}s / {sessionDuration}s){/if}
     </p>
     <p>
-      Palm angle: {palmAngle !== undefined ? palmAngle.toFixed(0) + '°' : '—'}
+      Palm angle: {displayedPalmAngle !== undefined ? displayedPalmAngle.toFixed(0) + '°' : '—'}
       {#if currentBinIndex !== undefined}
         (bin {currentBinIndex * BIN_WIDTH_DEG}-{(currentBinIndex + 1) * BIN_WIDTH_DEG}°)
-      {:else if palmAngle !== undefined}
+      {:else if displayedPalmAngle !== undefined}
         (outside 0-{BIN_COUNT * BIN_WIDTH_DEG}° range — not counted)
       {/if}
     </p>
-    <p>Thumb depth sign: {thumbDepth !== undefined ? thumbDepth.toFixed(3) : '—'}</p>
+    <p>Thumb depth sign: {displayedThumbDepth !== undefined ? displayedThumbDepth.toFixed(3) : '—'}</p>
     <p class:text-amber-400={noHandDetected}>
-      Current confidence: {currentScore !== undefined ? currentScore.toFixed(3) : '—'}
+      Current confidence: {displayedScore !== undefined ? displayedScore.toFixed(3) : '—'}
+    </p>
+    <p class="text-xs text-gray-400">
+      Numeric displays and tables refresh at ~{minCutoff.toFixed(2)} Hz ({displayRefreshIntervalSeconds.toFixed(
+        2
+      )}s between updates) -- tied to the One Euro min cutoff above.
     </p>
     {#if noHandDetected}
       <p class="text-amber-400 font-semibold">

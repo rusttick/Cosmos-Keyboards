@@ -185,6 +185,29 @@ function makeBasis(vectors: Vector3[], reverse: boolean) {
   return new Matrix4().makeBasis(x, up, left)
 }
 
+/** The 3 raw vectors makeBasis() builds `hand.basis` from -- exported for orientation-diagnostic
+ * visualization only (e.g. multi-view's axis triad), NOT a replacement for `hand.basis`/`hand.limbs`
+ * in any real fitting/measurement code. `hand.basis` isn't simply {normal, up, left} in that order:
+ * `makeHand()` inverts this matrix and premultiplies it by a fixed permutation before storing it, so
+ * `hand.limbs`' local X/Y/Z don't correspond 1:1 to normal/up/left -- see
+ * docs/thumbs/test_results.md's coordinate-convention discussion for the worked-out mapping and why
+ * it isn't safe to just relabel. This function recomputes the three vectors directly from
+ * `hand.vectors` instead of trying to reverse-engineer them out of `hand.basis`, so it can't drift out
+ * of sync with `makeBasis()`'s own formula.
+ *
+ * `normal` = the palm-plane normal (triangle landmarks 0, 5, 17; chirality-corrected), `up` = the 0→5
+ * direction Gram-Schmidt'd orthogonal to it, `left` = cross(normal, up). All three are attached at
+ * landmark 0 (the wrist) when drawn, matching every other normal-arrow visualization in this
+ * codebase. */
+export function palmBasisAxes(vectors: Vector3[], handedness: string): { normal: Vector3; up: Vector3; left: Vector3 } {
+  const m = makeBasis(vectors, handedness === 'Right')
+  const normal = new Vector3()
+  const up = new Vector3()
+  const left = new Vector3()
+  m.extractBasis(normal, up, left)
+  return { normal, up, left }
+}
+
 /** Transform a hand's keypoints into a list of vectors for each finger. */
 export function makeHand(hand: PoseHand, is2D = false, ptTransform = (pt: Vector3) => pt): Hand {
   const vectors = is2D
