@@ -13,7 +13,7 @@ Maintained by hand, not claude.
 - [x] `scan3-architecture.md` predates `HandPriorState`/`ikSolve.ts` — needs a pass once stage 1/2
       land to reconcile `Joint.quality`/`JointQuality` against the new prior/confidence model.
 
-Group A — bone lengths
+## literature search: Group A — bone lengths
 
 - [ ] Shortlist candidate anthropometric sources for per-segment hand-length regressions
       (Buchholz, Armstrong & Goldstein 1992 "Anthropometric data for describing the kinematics of the human hand";
@@ -32,7 +32,7 @@ Group A — bone lengths
 
 - [ ] Verify the transcribed seed against handModelData.test.ts's own stated criteria (every length positive, covariance matrices PSD) once both exist.
 
-Group E/F — DIP/PIP coupling and enslaving
+## literature search: Group E/F — DIP/PIP coupling and enslaving
 
 - [ ] Check whether the isometric-force enslaving literature already cited elsewhere in these docs
       (Kilbreath & Gandevia; "Matrix analyses of interaction among fingers in static force production tasks";
