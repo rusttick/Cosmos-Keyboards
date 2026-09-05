@@ -38,8 +38,10 @@ Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different k
   Per `goals.md`, none of these three DOF can be individually decomposed from a single MediaPipe Hands reading
   (no forearm-referenced landmark exists, and MediaPipe Pose is out of scope for this project) —
   but they are not frozen at the literature prior for that reason.
-  They are ordinary pose variables in the same `ikSolve.ts`-maintained `HandPriorState` every finger joint lives in
-  (`average-hand.md`'s "Underspecified DOF stay bounded" — an always-occluded node, not a structurally separate one),
+  They are ordinary pose variables in the same shared `HandPriorState` every finger joint lives in —
+  read every frame by `ikSolve.ts`, but written only by `update.ts`'s `ScanSession`-gated update, never
+  by `ikSolve.ts` itself (`average-hand.md`'s "Underspecified DOF stay bounded" — an always-occluded
+  node, not a structurally separate one),
   and narrow through three channels: `goals.md`'s weak composed landmark-0 observation
   (a term on combined wrist+forearm+elbow rotation, never assigned to one DOF),
   the named cross-group correlations (tenodesis links wrist angle to whatever finger rest-posture data has already converged;

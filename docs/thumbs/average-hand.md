@@ -23,10 +23,12 @@ below, populated with the literature values instead of left as a design placehol
 
 **One real gap this doesn't cover:** ring/pinky CMC mobility (part of Group D) has no slot in
 `hand.ts` today — `CONNECTIONS`/`LIMBS` fix every finger at exactly 4 bones, with no joint for a
-proximal CMC axis. `key-point-selection.md` already names this as an FK-chain prerequisite. This
-plan's solver can still estimate that axis's prior from Group D's literature seed, but **rendering
-it is out of scope until `hand.ts`'s FK chain is extended** — a separate, small, additive task, not
-assumed away here.
+proximal CMC axis. `key-point-selection.md` already names this as an FK-chain prerequisite. Without
+that joint in the FK chain, the reprojection data term has no way to observe this axis at all, from
+any frame — so this plan's solver cannot estimate it, only hold it at Group D's literature seed,
+unobserved, exactly like any other permanently-unobserved quantity (see "Underspecified DOF stay
+bounded" below). **Rendering it, and estimating it from data at all, are both out of scope until
+`hand.ts`'s FK chain is extended** — a separate, small, additive task, not assumed away here.
 
 Group C, on the other hand, needs no new type at all: the existing `degree: 3` + `ConjunctCoupling`
 mechanism (`aCoeff·angleZ + bCoeff·angleY = angleX`), built for the thumb CMC, is exactly the shape
@@ -94,9 +96,10 @@ adding it.
   not yet done, tracked as a task below.**
 - Update channels: MediaPipe Hands, caliper.
 - In the solve: not a free variable — the current mean is a constant parametrizing the FK map for
-  that frame. The frame's own inter-landmark distance vs. that constant is collected as an
-  observation for stage 4's cross-session update, not solved jointly with pose (see stage 3's
-  two-timescale note).
+  that frame. When the frame is `ScanSession`-sourced, its own inter-landmark distance vs. that
+  constant is collected as an observation for stage 4's cross-session update — never for a
+  live-tracking frame, per `goals.md`'s "ordinary use never updates it" rule — not solved jointly
+  with pose (see stage 3's timescale note).
 
 **B — PIP/DIP ROM**
 
@@ -125,7 +128,11 @@ adding it.
 - Literature seed: thumb ROM ≈53°/42°/17° axial (±3° stabilized); ring/pinky ≈15–30°.
 - Update channels: MediaPipe Hands, caliper (thumb bone lengths only, never thumb angles
   from non-`palm-facing` capture — `goals.md`'s exclusion rule, enforced as a hard filter on
-  which observations ever reach the solve, not a post-hoc down-weighting).
+  which observations ever reach the solve, not a post-hoc down-weighting). Thumb only, for the
+  MediaPipe Hands channel specifically: ring/pinky CMC has no observation channel at all yet — no
+  reprojection data term exists for it until `hand.ts`'s FK chain gains the joint (see "One real gap
+  this doesn't cover" above) — so it holds at its literature seed, unobserved, same as any other
+  permanently-unobserved quantity.
 
 **E — DIP/PIP coupling**
 
@@ -166,6 +173,12 @@ adding it.
   directly. Consumed by `ikSolve.ts` as a pose variable like every other group (see "Underspecified
   DOF stay bounded" and the parameter-groups intro above) — also read by `key-point-selection.md`'s
   landmark-0 placement step, which is a second consumer of the same posterior, not a separate one.
+  The weak composed MediaPipe observation plays both roles this doc distinguishes: every frame, live
+  or captured, it's a stage-3 data term that helps that frame's own displayed pose; only when the
+  frame is `ScanSession`-sourced does it additionally become a stage-4 observation narrowing the
+  long-term Group G posterior. An ordinary live-tracking frame's composed observation is used once,
+  for display, and then discarded — it never accumulates toward the posterior, same as everything
+  else `goals.md`'s "ordinary use never updates it" rule covers.
 
 Groups E and F's "no literature found" status is a real gap, not a placeholder — flag it plainly in
 code comments rather than inventing a citation.
@@ -182,7 +195,14 @@ code comments rather than inventing a citation.
    `hand.ts`'s `ConjunctCoupling` doc comment already uses), and the explicitly-flagged
    interim/uninformative values for E–F. This is "the average hand" as a `HandPriorState` value.
 
-3. **The solver.** `src/routes/scan3/lib/priors/ikSolve.ts` — two timescales, not one. The per-frame
+3. **The solver.** `src/routes/scan3/lib/priors/ikSolve.ts` — two timescales for state, plus a third for
+   continuity within the faster of the two: `HandPriorState` itself only ever moves on stage 4's slow,
+   cross-session timescale, never on this stage's per-frame one — this stage only _reads_ it, treating
+   it as fixed input no matter where the frame came from — a
+   scan phase, the evaluation page, or eventual production tracking. Nothing in this stage ever writes
+   back to `HandPriorState`; that's stage 4's job, and stage 4's alone (see below) — the direct fix for
+   what MediaPipe Hands alone gets wrong: an impossible movement or a spontaneous change in the
+   displayed model during ordinary use must never quietly become the new prior. The per-frame
    solve's only free variables are **pose** (joint angles, ~25–35 DOF for one hand, now including
    Group G's five wrist/forearm/elbow angles alongside the finger joints — see "Underspecified DOF
    stay bounded" above for why they're ordinary pose variables here, not a separate mechanism) — a small
@@ -212,39 +232,82 @@ code comments rather than inventing a citation.
      ROM term, just conditional on another solved quantity instead of a fixed constant. Without this
      term the coupling coefficients would only ever be _learned from_ the solver's output, never _used
      by_ it — the gap that would leave "lean on good data to correct bad data via anatomy" undone.
-   - **v1 simplifications, named rather than silently dropped**: no pose-to-pose temporal smoothness
-     yet — a separate thing from the landmark filter above, this would be a term penalizing the
-     _solved pose_ (this frame's fitted joint angles) against the _previous frame's solved pose_, and
-     using that as the optimizer's warm start. v1 solves each frame independently, cold-started, from
-     already-filtered landmarks — a performance/quality refinement to add later, not a missing input
-     hygiene step. No landmark-level confidence downweighting from bone-length deviation yet either
+   - **Warm start and temporal smoothness**: every frame after the first seeds the optimizer's initial
+     guess from the _previous frame's solved pose_, not cold from scratch, and adds a quadratic penalty
+     between the candidate pose and that previous solved pose — a separate term from the landmark
+     filter above, which cleans the raw signal; this one keeps the _solved_ pose from jumping between
+     plausible-but-different local optima frame to frame. The penalty's weight scales down as
+     inter-frame time delta grows, so a dropped frame or a genuinely fast movement isn't penalized as
+     if it were normal-cadence motion — a live-tuned parameter, in the same spirit as the One Euro
+     filter's `minCutoff`/`beta` and `test-results.md`'s threshold recalibrations, not a guessed
+     constant shipped as final.
+   - **First-frame cold start**: with no previous solved pose to warm-start from, initialize every pose
+     variable to `HandPriorState`'s current population-mean pose — the same neutral-initialization
+     rule "Underspecified DOF stay bounded" above already specifies for a quantity with no observation,
+     applied here to the very first frame of a session rather than to a specific DOF.
+   - **Divergence recovery**: a warm start is a liability, not just a convenience, if the solver gets
+     stuck in a wrong local basin — nothing about warm-starting alone un-sticks it. If the residual
+     (stage output, below) stays above a threshold for _k_ consecutive frames, discard the warm start
+     and re-cold-start: run the solve from a small fixed set of plausible initial poses (the population
+     mean, plus a couple of named archetypal postures) and keep whichever converges to the lowest total
+     cost. This is the same "easy pose to bootstrap into a hard one" property `ik-solve-research.md`
+     already flags MediaPipe's own detector as relying on, applied to this solver instead.
+   - No landmark-level confidence downweighting from bone-length deviation yet
      (that signal needs at least one already-converged length to bootstrap from, which doesn't exist at
-     first use — a fast-follow once Group A has real confidence, not a permanent gap).
+     first use — a fast-follow once Group A has real confidence, not a permanent gap). This remains the
+     one named v1 simplification in this stage.
    - Output per frame: the solved pose (joint angles) and a residual (how well the current prior set
      explains this frame) — the residual is what stage 4 reads.
 
-4. **Promotion / posterior update.** `src/routes/scan3/lib/priors/update.ts` — reads the solver's
-   output (solved pose + residual) and each frame's raw length/coupling observations across repeated
-   frames/sessions, and applies a recursive Bayesian mean/covariance update to the relevant
-   `HandPriorState` entries, gated by: the orientation/condition exclusion rule (an excluded
-   observation never reaches the solve at all, not just the update) and cross-session consistency
-   before any parameter's variance is allowed to shrink (confidence to grow). This is fed entirely by
-   the solver's per-frame output — there is no separate direct-geometry update path running alongside it.
+4. **Promotion / posterior update.** `src/routes/scan3/lib/priors/update.ts` — the only place
+   `HandPriorState` is ever written, per `goals.md`'s "ordinary use of the model never updates it"
+   rule. Its inputs are exactly the two kinds of observation that rule recognizes as legitimate — never
+   a third: (a) the constrained solver's pose + residual output, when the underlying frame is sourced
+   from a designated `ScanSession` capture phase (`scan3-architecture.md`); and (b) a direct external
+   measurement — caliper, goniometer, or manual numeric entry — supplied as an explicit user action
+   (Groups A, D, G). What both share, and what a live-tracking frame lacks, is deliberateness: each is
+   the result of a specific, user-initiated measurement act, not ambient accumulation from ordinary use.
+   That's the actual distinguishing property behind the boundary — not "did it pass through the
+   solver," which would wrongly exclude caliper/manual-entry channels, but "was this act a deliberate
+   measurement, or passive accumulation." No `ScanSession`-external MediaPipe frame, and no passive
+   accumulation of any kind, ever reaches this stage, no matter how many frames accumulate or how
+   consistent they look — the same reasoning `ik-solve-research.md`'s rejection of unsupervised
+   self-calibration already establishes (Test 3's reproducible thumb bias — an unscripted, uncontrolled
+   source of motion has no mechanism to catch a systematic bias, so it must never be allowed to
+   silently become the new ground truth), applied here to draw the line between "using the model" and
+   "measuring the hand" at the code level, not just the reasoning level. Within that boundary, updates
+   apply a recursive Bayesian mean/covariance update to the relevant `HandPriorState` entries, gated
+   by: the orientation/condition exclusion rule (an excluded observation never reaches the solve at
+   all, not just the update) and cross-session consistency before any parameter's variance is allowed
+   to shrink (confidence to grow). There is no separate direct-geometry update path running alongside
+   this one, and no path from live-tracking frames at all.
 
 5. **Render.** Reuse `SolvedHand.fkBy`/`worldPositions` (existing, unmodified `hand.ts` code) to turn
    the solver's per-frame pose into world-space geometry. Pure glue, not a second fitting step.
 
 6. **Read-only evaluation page.** Extend `src/routes/scan-tests/multi-view/+page.svelte`: every live
-   frame, run the solver against the current `HandPriorState` (initially just the literature seed) and
-   the frame's raw tracked landmarks, and render the corrected pose. Raw MediaPipe output is never
-   shown as the final answer; what's displayed is always the model-constrained solve. The elbow, and
-   the rest of Group G, are solved and rendered exactly like every other joint in stages 3/5 — no
-   separate step is needed here. What's worth watching for at this stage: does the wrist/elbow
-   posture visibly narrow over a session as tenodesis-linked finger data accumulates, or does it stay
-   pinned at the literature prior — a second thing worth judging by eye alongside finger-pose
-   plausibility. No persistence and no UI to trigger a posterior update yet — even holding the prior
-   fixed, seeing corrupted or occluded frames fail to visibly distort the displayed hand is the real
-   thing worth judging by eye here, not just a side-by-side comparison.
+   frame, run the solver against whichever `HandPriorState` snapshot is currently loaded (initially
+   just the literature seed) and the frame's raw tracked landmarks, and render the corrected pose. Raw
+   MediaPipe output is never shown as the final answer; what's displayed is always the
+   model-constrained solve, read against that fixed snapshot. The elbow, and the rest of Group G, are
+   solved and rendered exactly like every other joint in stages 3/5 — no separate step is needed here.
+   What's worth watching for at this stage: whether the displayed wrist/elbow posture looks
+   anatomically plausible given the loaded prior's current confidence, and whether corrupted or
+   occluded frames fail to visibly distort the displayed hand — not whether the posture narrows during
+   the session, since this page never writes to `HandPriorState` (stage 4 is the only writer) and isn't
+   expected to. **This is a permanent property of live tracking, not a v1 gap**: no future version of
+   this page, or of production tracking, ever triggers a posterior update — updating the model stays
+   exclusively a `ScanSession` capture-phase action (stage 4), never something ordinary use of the
+   model can do, by design.
+   - **Confidence needs to be visible, not just the pose.** "Looks plausible given the loaded prior's
+     current confidence" isn't judgeable without seeing that confidence — a joint that's merely sitting
+     near its (unconverged, wide) prior and a joint that's confidently converged there can render
+     identically otherwise. Color or vary the opacity of each rendered joint by its `HandPriorState`
+     covariance magnitude (a separate visual channel from any existing deviation-from-neutral coloring
+     elsewhere in this codebase, e.g. the contact-sphere preview's tiers — this one encodes confidence,
+     not posture). Without it, a corrupted frame's pose staying bounded reads the same whether it was
+     genuinely constrained by a confident prior or coincidentally close to a wide, barely-informative
+     one.
 
 ## Testing
 
@@ -272,7 +335,14 @@ Unit-testable (pure functions, `bun:test`, same convention as `landmarkFilter.te
   observation, checked directly:** a manual wrist-angle entry tagged with self-report-level noise
   moves the posterior less than a goniometer-tagged entry of the same value; an implausible manual
   entry that fails the exclusion gate is confirmed to never enter the update at all — the same gate
-  applied to a MediaPipe or caliper observation elsewhere in the model.
+  applied to a MediaPipe or caliper observation elsewhere in the model. **Warm start and smoothness,
+  checked directly:** a synthetic clean sequence recovers the same pose whether cold- or warm-started
+  (warm start changes convergence speed, not the answer); a synthetic sequence with one wildly
+  corrupted frame sandwiched between clean ones stays close to the clean trajectory at that frame
+  rather than jumping to match the corrupted input, which cold-start-only (no smoothness term) does
+  not guarantee. **Divergence recovery, checked directly:** a warm start deliberately seeded into a
+  wrong local basin (a synthetic finger-identity swap) is confirmed to trigger re-cold-start within
+  the configured _k_-frame threshold and recover the correct pose, rather than staying stuck.
 - `update.test.ts` — the recursive mean/covariance update, fed synthetic solver output, moves the mean
   toward it and shrinks variance; a caliper/manual-entry-tagged observation dominates a MediaPipe-tagged
   one of equal magnitude given their declared noise difference; a joint update against a correlated
@@ -287,12 +357,13 @@ project (`test-results.md`'s Tests 6/7).
 
 ## Non-goals (this plan)
 
-- Temporal smoothness / previous-frame warm start in the solver — a named v1 simplification (stage 3),
-  not a missing concept.
 - Landmark-level confidence downweighting from bone-length deviation — bootstraps once Group A has
   real confidence; a fast-follow, not part of this plan.
-- Any UI to trigger or persist a posterior update — stage 6 runs the solver live for display only;
-  nothing yet writes a new observation back into a saved `HandPriorState`.
+- A UI to trigger a posterior update from stage 6 or any other live-tracking context — not a gap to
+  fill later, a permanent boundary (see stage 4/6 above): updating `HandPriorState` is exclusively a
+  `ScanSession` capture-phase action. Stage 6's persistence gap is real and separate — it doesn't yet
+  save a `ScanSession`'s own promoted results either — but that's an implementation detail of the one
+  legitimate update path, not evidence that live tracking might grow one.
 - Sourcing Group A's exact per-segment mean/SD table from a specific named anthropometric study —
   flagged in stage 2 as a required task, not done by this plan itself.
 - Groups E/F's literature gap — left as an honest uninformative prior, not backfilled with an

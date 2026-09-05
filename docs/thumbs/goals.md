@@ -143,6 +143,8 @@ Named cross-group correlations the model must represent explicitly (not covered 
 - Every attribute is reported as its current posterior (mean + variance/covariance entry)
   plus its evidence (session count, source: population prior / MediaPipe Hands / caliper / manual entry) — never a bare point value.
 
+- **Ordinary use of the model never updates it.** The distinction is not "which channel" but "which act": a designated capture-session action — a scan phase's guided elicitation, a caliper reading, a goniometer reading, a manual numeric entry — is eligible to update the posterior; passive accumulation from live tracking, of any duration or apparent consistency, never is, regardless of which of the three channels above it came from. This is the direct architectural answer to MediaPipe Hands' own failure mode: an impossible movement or a spontaneous change in tracked geometry during ordinary use must never be able to quietly become the new prior. Live tracking reads the current posterior as fixed input to solve and display a pose; only a designated capture action writes to it. This is the exclusion rule above (`ik-solve-research.md`'s rejection of unsupervised self-calibration) promoted to a hard architectural boundary, not a per-observation judgment call left to implementation.
+
 ## Keyboard design output — required attributes
 
 see key-point-selection.md

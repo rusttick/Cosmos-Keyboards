@@ -1,6 +1,6 @@
 # `/scan3` architecture: implementing `capture-protocol.md`
 
-> **Status:** Active spec · Depends on: `capture-protocol.md` · Not yet updated for `average-hand.md`'s `HandPriorState`/`ikSolve.ts` addition — see TODO.md
+> **Status:** Active spec · Depends on: `capture-protocol.md` · Partially reconciled with `average-hand.md`'s `HandPriorState` — see TODO.md
 
 This is the implementation architecture for `capture-protocol.md`'s capture protocol: data structures, module boundaries, file layout, and state ownership for the `/scan3` route, close enough to code that filling in the bodies should be mechanical.
 
@@ -76,6 +76,8 @@ interface JointQuality {
 ```
 
 Earlier drafts of this schema also carried a `neutralAngle` field here, populated by Phase 2's inline capture. It's deliberately gone: neutral/resting posture is not a property of the capability scan at all, and giving it a privileged slot on `Joint.quality` — separate from, and inconsistent with, the labeled `restingPostures` a user can capture and swap later — undercuts using it as a swappable design input. See "Resting postures are not `HandData`" below; every use that would have read `Joint.quality.neutralAngle` (the contact-sphere preview's deviation coloring, in particular) instead reads whichever named resting posture is currently selected.
+
+**Relationship to `average-hand.md`'s `HandPriorState`.** These are two different confidence representations, on purpose, not a duplication to be merged: `JointQuality` is a **session-local diagnostic** — what one capture phase directly observed this session (raw extrema, the SVD axis-fit ratio) — computed and stored the same way regardless of whether `average-hand.md`'s solver exists at all. `HandPriorState`'s covariance is the **actual probabilistic model state** `ikSolve.ts` reads every frame and the only thing that persists across sessions. `ikSolve.ts` never reads `Joint.quality` directly. The one bridge between them is `average-hand.md`'s stage 4 (`update.ts`): when a `ScanSession` phase completes, its `JointQuality`/`DipPipCoupling`/`Enslaving` output is ingested as one more noise-tagged observation into the same recursive Bayesian update every other observation goes through — structurally identical to how a caliper reading is ingested, not a second confidence system running in parallel. Concretely: `axisFitConfidence` becomes (part of) that observation's declared noise, not a second, competing confidence value living alongside `HandPriorState`'s own covariance.
 
 ### Per-finger and cross-finger coupling
 
