@@ -35,36 +35,53 @@ solver produces `degree: 3` joints directly rather than depending on `calculateJ
 
 ## Underspecified DOF stay bounded, never free-floating
 
-A general rule, not just an elbow special case: any quantity with no confident live observation is
-initialized to a neutral, prior-consistent value and only moves as far as its connection to whatever
+A general rule, with no elbow special case: any quantity with no confident live observation this frame
+is initialized to a neutral, prior-consistent value and only moves as far as its connection to whatever
 _is_ currently observed allows — it never moves freely, and it's never snapped directly to a raw noisy
-reading. For most of the model this falls out of the same prior-vs-data competition already described
-above (an occluded fingertip's bad reading simply loses to the ROM/length prior once that prior is
-confident). The elbow is the one case that needs explicit handling, because unlike an occasionally-bad
-fingertip, it has _no_ observation channel at all, ever, under this project's scope:
+reading. There is no structural distinction in this solver between "a joint with a temporarily bad
+reading this frame" and "a joint with no reading, ever" — both are the same case: an empty (or
+down-weighted) data term for that quantity this frame, with its regularization term (including
+`problems2.md`'s named cross-group correlations) supplying everything else. This is what lets
+`problems2.md`'s wrist/forearm/elbow group (Group G) live inside the same solve as every finger joint
+rather than as a bolted-on special case:
 
-- On first detection, the elbow gets a neutral initial position from Group G's prior (forearm length
-  - elbow-flexion + swivel-angle means) relative to wherever the wrist is first tracked.
-- From then on it is **back-driven**, not actively solved: it follows the tracked wrist's live position
-  and rigid orientation through space (both real, observed quantities), held at that same fixed
-  prior/manual elbow-flexion and swivel-angle configuration. It moves when the hand moves as a rigid
-  body, but it does not — cannot — react to genuine live wrist articulation, since that specific signal
-  (wrist angle relative to the forearm) has no observation channel here (established earlier: no
-  forearm-referenced landmark, no MediaPipe Pose).
-- This is a small, separate, deterministic step — forward kinematics from the tracked wrist outward,
-  not part of `ikSolve.ts`'s finger-pose optimization — added to stage 6 below.
+- Elbow flexion, elbow swivel angle, and forearm pronation/supination never have a reprojection data
+  term — no landmark observes them, ever, under this project's scope. Wrist flexion/extension and
+  radial/ulnar deviation additionally receive `problems2.md`'s weak, composed MediaPipe observation
+  (landmark-0 orientation, entered as a term on the _sum_ of wrist+forearm+elbow rotation, never
+  decomposed). Both cases run through the identical Mahalanobis-prior-plus-coupling machinery as an
+  MCP joint, just with a permanently near-empty (Group G's wrist DOF) or fully-empty (elbow, forearm
+  pronation) data term instead of a merely-occluded one.
+- Concretely, on first detection: every pose variable, Group G included, is initialized to its current
+  `HandPriorState` mean — the population prior on day one, narrower once `problems2.md`'s named
+  cross-group correlations (tenodesis, forearm-length↔stature, swivel-angle↔wrist-pose) have pulled it
+  via whatever else has already solved this session.
+- From then on, each frame's solve updates it exactly like any other pose variable: pulled toward its
+  own prior/coupling terms, pulled toward the (near-)empty data term it does have, output alongside
+  every other joint's angle. No separate deterministic FK step, no back-driving, no elbow-specific code
+  path — stage 6 renders it the same way it renders a finger joint, because by this point it mechanically
+  is one.
 
 ## Parameter groups
 
-Every group below is an entry in the same `HandPriorState`, but not every group is consumed by
-`ikSolve.ts`. Groups A–F feed the per-frame finger-pose solve (as either a pose variable or a
-frame-constant, per stage 3). Group G does not: there is no observation channel for wrist/forearm
-rotation from tracked _finger_ landmarks at all (established earlier — no forearm reference exists
-without MediaPipe Pose), so it has no pose variable to regularize in this solver. It's still part of
-the shared prior state, consumed instead by `key_point_selection.md`'s landmark-0 placement step.
+Every group below is an entry in the same `HandPriorState`, and every group — Group G included — is
+consumed by `ikSolve.ts` as either a pose variable or a frame-constant (per stage 3). What differs
+frame to frame is only whether a quantity has a data term this frame, which is a per-quantity runtime
+fact, not a structural per-group split: a finger MCP usually has one, an occluded finger this frame
+doesn't, and elbow flexion/swivel/forearm pronation never do — all three are handled by the identical
+prior-vs-data machinery (see "Underspecified DOF stay bounded" above). Group G's two wrist DOF
+additionally receive the weak composed MediaPipe observation `problems2.md` describes.
+`key_point_selection.md`'s landmark-0 placement step still reads the resulting posterior — that's a
+second consumer of the same state, not evidence that `ikSolve.ts` skips it.
 
-One block-diagonal covariance per group (not one N×N matrix across everything) is still the right
-simplification — most groups have no documented cross-group correlation.
+Block-diagonal per group is the right simplification for most pairs — not one dense N×N matrix across
+everything — but three cross-group entries are explicit exceptions, sourced directly from
+`problems2.md`'s named correlations, and must be represented even though they cross a group boundary:
+(1) Group G's wrist flex/ext & radial/ulnar deviation ↔ Groups B/C's rest-flexion component
+(tenodesis); (2) Group G's forearm length ↔ Group A's hand-length reference (shared stature
+regression); (3) Group G's elbow swivel angle ↔ its own wrist-pose and forearm-length entries
+(swivel-angle criterion). Every other pairing stays block-diagonal unless a future citation justifies
+adding it.
 
 **A — Bone lengths**
 
@@ -127,16 +144,26 @@ simplification — most groups have no documented cross-group correlation.
 
 **G — Wrist/forearm**
 
-- Parameters: wrist flex/ext + radial/ulnar ROM (coupled), forearm pronation/supination
-  ROM, elbow flexion + swivel angle, forearm length ratio.
-- Distribution: Beta (angles) + lognormal (length).
+- Parameters: wrist flex/ext + radial/ulnar ROM (coupled — not two independent Beta marginals; see
+  the tenodesis cross-term above), forearm pronation/supination ROM, elbow flexion + swivel angle,
+  forearm length ratio.
+- Distribution: Beta (angles) + lognormal (length), plus the three named cross-group covariance
+  entries above — this group cannot be represented as independent per-DOF Beta marginals without
+  losing the tenodesis and swivel-angle relationships `problems2.md` requires.
 - Literature seed: wrist ROM ≈85°/85°, ≈15°/45°; elbow ≈90–110°; swivel-angle criterion
   (<5° error, reaching-task origin, untested for typing).
-- Update channels: forearm length — caliper only. Everything else in this group —
-  **manual numeric entry only**: no MediaPipe Hands channel exists (no forearm-referenced
-  landmark), no MediaPipe Pose (out of scope per project decision). Not consumed by `ikSolve.ts`
-  at all (see above) — these entries update via stage 4's same recursive Bayesian mechanism, just
-  driven solely by manual/caliper observations, and are read by `key_point_selection.md` instead.
+- Update channels: forearm length — caliper, direct. Elbow flexion/swivel/forearm pronation — no
+  data term, ever, under this project's scope; posterior moves only via the cross-group correlations
+  above and manual numeric entry when supplied. Wrist flex/ext and radial/ulnar deviation — the same,
+  plus `problems2.md`'s weak composed MediaPipe-Hands observation (landmark-0 orientation, entered as
+  a term on wrist+forearm+elbow rotation summed, never decomposed; wide noise, never allowed to
+  dominate the prior alone). Manual numeric entry, for any DOF in this group, is ingested exactly
+  like a caliper or MediaPipe observation elsewhere in the model — its own noise variance set by how
+  it was obtained (a goniometer reading behaves like a caliper measurement, a self-report carries
+  wider noise), subject to the same exclusion/plausibility gate, never written to the posterior mean
+  directly. Consumed by `ikSolve.ts` as a pose variable like every other group (see "Underspecified
+  DOF stay bounded" and the parameter-groups intro above) — also read by `key_point_selection.md`'s
+  landmark-0 placement step, which is a second consumer of the same posterior, not a separate one.
 
 Groups E and F's "no literature found" status is a real gap, not a placeholder — flag it plainly in
 code comments rather than inventing a citation.
@@ -154,7 +181,9 @@ code comments rather than inventing a citation.
    interim/uninformative values for E–F. This is "the average hand" as a `HandPriorState` value.
 
 3. **The solver.** `src/routes/scan3/lib/priors/ikSolve.ts` — two timescales, not one. The per-frame
-   solve's only free variables are **pose** (joint angles, ~20–30 DOF for one hand) — a small
+   solve's only free variables are **pose** (joint angles, ~25–35 DOF for one hand, now including
+   Group G's five wrist/forearm/elbow angles alongside the finger joints — see "Underspecified DOF
+   stay bounded" above for why they're ordinary pose variables here, not a separate mechanism) — a small
    Gauss-Newton/Levenberg-Marquardt run every frame, on landmarks that have already passed through
    the existing `landmarkFilter.ts` despike + One Euro filter unchanged (that filter cleans the raw
    landmark signal itself and stays exactly where it is today, upstream of everything below, per
@@ -206,12 +235,14 @@ code comments rather than inventing a citation.
 6. **Read-only evaluation page.** Extend `src/routes/scan-tests/multi-view/+page.svelte`: every live
    frame, run the solver against the current `HandPriorState` (initially just the literature seed) and
    the frame's raw tracked landmarks, and render the corrected pose. Raw MediaPipe output is never
-   shown as the final answer; what's displayed is always the model-constrained solve. Add the elbow
-   as the "underspecified DOF" step above: neutral-initialize it on first detection, then back-drive
-   it from the tracked wrist's live position/orientation each frame, rendered alongside the fitted
-   hand. No persistence and no UI to trigger a posterior update yet — even holding the prior fixed,
-   seeing corrupted or occluded frames fail to visibly distort the displayed hand is the real thing
-   worth judging by eye here, not just a side-by-side comparison.
+   shown as the final answer; what's displayed is always the model-constrained solve. The elbow, and
+   the rest of Group G, are solved and rendered exactly like every other joint in stages 3/5 — no
+   separate step is needed here. What's worth watching for at this stage: does the wrist/elbow
+   posture visibly narrow over a session as tenodesis-linked finger data accumulates, or does it stay
+   pinned at the literature prior — a second thing worth judging by eye alongside finger-pose
+   plausibility. No persistence and no UI to trigger a posterior update yet — even holding the prior
+   fixed, seeing corrupted or occluded frames fail to visibly distort the displayed hand is the real
+   thing worth judging by eye here, not just a side-by-side comparison.
 
 ## Testing
 
@@ -230,10 +261,22 @@ Unit-testable (pure functions, `bun:test`, same convention as `landmarkFilter.te
   — not a pose matching the corrupted input. **Coupling correction, checked directly:** given a
   high-confidence DIP/PIP coupling and a clean PIP reading, a corrupted DIP landmark is pulled toward
   the coupling-predicted angle rather than the corrupted one; the same check repeated with a low-
-  confidence coupling confirms the pull is much weaker.
+  confidence coupling confirms the pull is much weaker. **Cross-group correlation, checked directly:**
+  given confident (low-covariance) finger rest-flexion data and the tenodesis cross-term, the wrist
+  flex/ext posterior narrows from its literature-prior covariance even though it has zero direct or
+  composed observations that session — confirming Group G benefits from evidence elsewhere in the
+  model rather than sitting frozen at the population prior forever, and stays strictly narrower than
+  an uninformed prior even with no MediaPipe channel of its own. **Manual entry as a suspect
+  observation, checked directly:** a manual wrist-angle entry tagged with self-report-level noise
+  moves the posterior less than a goniometer-tagged entry of the same value; an implausible manual
+  entry that fails the exclusion gate is confirmed to never enter the update at all — the same gate
+  applied to a MediaPipe or caliper observation elsewhere in the model.
 - `update.test.ts` — the recursive mean/covariance update, fed synthetic solver output, moves the mean
   toward it and shrinks variance; a caliper/manual-entry-tagged observation dominates a MediaPipe-tagged
-  one of equal magnitude given their declared noise difference.
+  one of equal magnitude given their declared noise difference; a joint update against a correlated
+  pair (e.g. the tenodesis term) narrows the unobserved dimension's variance, not just the observed
+  one's — confirming the update is a true joint-covariance conditioning step, not N independent
+  per-scalar updates that happen to share a struct.
 
 Not unit-testable, and not attempted as such: whether the solver's live corrected pose _looks_ more
 anatomically plausible than raw tracking. That's the multi-view page's job — a human judgment call,

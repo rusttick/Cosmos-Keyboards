@@ -33,11 +33,18 @@ Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different k
   and a **force-availability cost** (derived from the same tendon force-length relationship,
   penalizing wrist angles that leave a finger's press force too low) —
   this is a real tradeoff to expose to the packing cost, not something to resolve by fiat toward "neutral."
-  Per `problems2.md`, these three DOF have no webcam observation channel at all
-  (single-hand MediaPipe Hands can't decompose wrist rotation from whole-arm rotation without a forearm-referenced landmark,
-  and MediaPipe Pose is out of scope for this project) —
-  the posterior sampled here is whatever the literature prior plus any manual numeric entry currently gives,
-  not a live-tracked signal.
+  Per `problems2.md`, none of these three DOF can be individually decomposed from a single MediaPipe Hands reading
+  (no forearm-referenced landmark exists, and MediaPipe Pose is out of scope for this project) —
+  but they are not frozen at the literature prior for that reason.
+  They are ordinary pose variables in the same `ikSolve.ts`-maintained `HandPriorState` every finger joint lives in
+  (`average_hand.md`'s "Underspecified DOF stay bounded" — an always-occluded node, not a structurally separate one),
+  and narrow through three channels: `problems2.md`'s weak composed landmark-0 observation
+  (a term on combined wrist+forearm+elbow rotation, never assigned to one DOF),
+  the named cross-group correlations (tenodesis links wrist angle to whatever finger rest-posture data has already converged;
+  the swivel-angle criterion links elbow angle to forearm length and wrist pose), and manual numeric entry when supplied
+  — ingested as one more noise-tagged observation, not written straight to the mean.
+  The posterior sampled here is whatever `HandPriorState` currently holds from those channels, live-read at sample time,
+  not resampled from the literature prior in isolation.
 
 - **Translational (3 DOF): where landmark 0 sits in space relative to the keyboard.**
   This is _not_ a hand-intrinsic property — it's governed by shoulder/elbow position
