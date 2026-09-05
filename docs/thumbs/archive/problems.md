@@ -1,5 +1,7 @@
 # Fundamentals: RSI, hand kinematics, and what our scan model can and can't tell us
 
+> **Status:** Archived, 2026-09-05 · Superseded by `../goals.md`. Describes a pre-`/scan3` baseline (thumb CMC fixed at 0 DOF, no ROM capture) that no longer reflects the codebase, and its wrist/tenting conclusion is superseded by `../goals.md`'s Group G treatment. RSI/minimum-jerk/enslaving citations are still valid and re-cited in `../capture-protocol.md`/`../key-point-selection.md`.
+
 This document sets up the problem before we design any placement algorithm. It covers three things: (1) why key placement matters for injury risk at all, in terms a kinematic model can act on; (2) exactly what our `/scan` pipeline measures and doesn't measure, so we know what the model is actually capable of grounding; (3) the theoretical solution space for "ergonomic" key placement relative to a kinematic model, with construction constraints (case walls, keycap geometry, manufacturability) set aside.
 
 ## 1. What repetitive strain injury actually depends on, in terms we can model

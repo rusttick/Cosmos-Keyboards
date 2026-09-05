@@ -1,7 +1,9 @@
 # Average hand: implementation plan
 
-This plan routes every attribute in `problems2.md`'s model, and every live frame of MediaPipe
-tracking, through one constrained solve — `iksolve_research.md`'s proposed `ikSolve.ts`. The point of
+> **Status:** In progress — plan stages not started (see TODO.md) · Depends on: `goals.md`, `ik-solve-research.md`, `scan3-architecture.md`
+
+This plan routes every attribute in `goals.md`'s model, and every live frame of MediaPipe
+tracking, through one constrained solve — `ik-solve-research.md`'s proposed `ikSolve.ts`. The point of
 that solve is not abstract fusion — it's that MediaPipe alone can produce anatomically impossible
 output (bones that change length frame to frame, joints bent past their real range, a hand that
 flips or "explodes" under occlusion), and a confident anatomical prior is what stops a single bad
@@ -16,12 +18,12 @@ correct — there isn't yet anatomy to trust over it.
 pose into world-space geometry for groups A, B, E, F, and the thumb half of D — no changes needed
 there. `$lib/hand.ts`'s `fromLimbs`/`calculateJoints` (hard-constraint fitting, used today by `/scan2`)
 is a different, older mechanism and is **not** what this plan builds on — `/scan2` keeps using it
-untouched. `iksolve_research.md`'s `KinematicPriors` sketch becomes the actual `HandPriorState` type
+untouched. `ik-solve-research.md`'s `KinematicPriors` sketch becomes the actual `HandPriorState` type
 below, populated with the literature values instead of left as a design placeholder.
 
 **One real gap this doesn't cover:** ring/pinky CMC mobility (part of Group D) has no slot in
 `hand.ts` today — `CONNECTIONS`/`LIMBS` fix every finger at exactly 4 bones, with no joint for a
-proximal CMC axis. `key_point_selection.md` already names this as an FK-chain prerequisite. This
+proximal CMC axis. `key-point-selection.md` already names this as an FK-chain prerequisite. This
 plan's solver can still estimate that axis's prior from Group D's literature seed, but **rendering
 it is out of scope until `hand.ts`'s FK chain is extended** — a separate, small, additive task, not
 assumed away here.
@@ -41,19 +43,19 @@ _is_ currently observed allows — it never moves freely, and it's never snapped
 reading. There is no structural distinction in this solver between "a joint with a temporarily bad
 reading this frame" and "a joint with no reading, ever" — both are the same case: an empty (or
 down-weighted) data term for that quantity this frame, with its regularization term (including
-`problems2.md`'s named cross-group correlations) supplying everything else. This is what lets
-`problems2.md`'s wrist/forearm/elbow group (Group G) live inside the same solve as every finger joint
+`goals.md`'s named cross-group correlations) supplying everything else. This is what lets
+`goals.md`'s wrist/forearm/elbow group (Group G) live inside the same solve as every finger joint
 rather than as a bolted-on special case:
 
 - Elbow flexion, elbow swivel angle, and forearm pronation/supination never have a reprojection data
   term — no landmark observes them, ever, under this project's scope. Wrist flexion/extension and
-  radial/ulnar deviation additionally receive `problems2.md`'s weak, composed MediaPipe observation
+  radial/ulnar deviation additionally receive `goals.md`'s weak, composed MediaPipe observation
   (landmark-0 orientation, entered as a term on the _sum_ of wrist+forearm+elbow rotation, never
   decomposed). Both cases run through the identical Mahalanobis-prior-plus-coupling machinery as an
   MCP joint, just with a permanently near-empty (Group G's wrist DOF) or fully-empty (elbow, forearm
   pronation) data term instead of a merely-occluded one.
 - Concretely, on first detection: every pose variable, Group G included, is initialized to its current
-  `HandPriorState` mean — the population prior on day one, narrower once `problems2.md`'s named
+  `HandPriorState` mean — the population prior on day one, narrower once `goals.md`'s named
   cross-group correlations (tenodesis, forearm-length↔stature, swivel-angle↔wrist-pose) have pulled it
   via whatever else has already solved this session.
 - From then on, each frame's solve updates it exactly like any other pose variable: pulled toward its
@@ -70,13 +72,13 @@ frame to frame is only whether a quantity has a data term this frame, which is a
 fact, not a structural per-group split: a finger MCP usually has one, an occluded finger this frame
 doesn't, and elbow flexion/swivel/forearm pronation never do — all three are handled by the identical
 prior-vs-data machinery (see "Underspecified DOF stay bounded" above). Group G's two wrist DOF
-additionally receive the weak composed MediaPipe observation `problems2.md` describes.
-`key_point_selection.md`'s landmark-0 placement step still reads the resulting posterior — that's a
+additionally receive the weak composed MediaPipe observation `goals.md` describes.
+`key-point-selection.md`'s landmark-0 placement step still reads the resulting posterior — that's a
 second consumer of the same state, not evidence that `ikSolve.ts` skips it.
 
 Block-diagonal per group is the right simplification for most pairs — not one dense N×N matrix across
 everything — but three cross-group entries are explicit exceptions, sourced directly from
-`problems2.md`'s named correlations, and must be represented even though they cross a group boundary:
+`goals.md`'s named correlations, and must be represented even though they cross a group boundary:
 (1) Group G's wrist flex/ext & radial/ulnar deviation ↔ Groups B/C's rest-flexion component
 (tenodesis); (2) Group G's forearm length ↔ Group A's hand-length reference (shared stature
 regression); (3) Group G's elbow swivel angle ↔ its own wrist-pose and forearm-length entries
@@ -87,7 +89,7 @@ adding it.
 
 - Parameters: 4 lengths × 5 fingers, ratio to hand-length reference.
 - Distribution: lognormal, full covariance per finger (and across fingers where regression supports it).
-- Literature seed: anthropometric regression, R² 0.49–0.99 by segment (`iksolve_research.md`) —
+- Literature seed: anthropometric regression, R² 0.49–0.99 by segment (`ik-solve-research.md`) —
   **needs one named source dataset picked and its actual per-segment mean/SD table transcribed;
   not yet done, tracked as a task below.**
 - Update channels: MediaPipe Hands, caliper.
@@ -122,7 +124,7 @@ adding it.
 - Distribution: Beta (ROM) + linear (`aCoeff`/`bCoeff`).
 - Literature seed: thumb ROM ≈53°/42°/17° axial (±3° stabilized); ring/pinky ≈15–30°.
 - Update channels: MediaPipe Hands, caliper (thumb bone lengths only, never thumb angles
-  from non-`palm-facing` capture — `problems2.md`'s exclusion rule, enforced as a hard filter on
+  from non-`palm-facing` capture — `goals.md`'s exclusion rule, enforced as a hard filter on
   which observations ever reach the solve, not a post-hoc down-weighting).
 
 **E — DIP/PIP coupling**
@@ -130,7 +132,7 @@ adding it.
 - Parameters: slope + intercept × 5 fingers × 2 hands.
 - Distribution: Gaussian on slope/intercept.
 - Literature seed: **no independent population-literature source found** — seed from this
-  project's own Test 8 measurements (`test_results.md`), flagged as a lower-rigor interim
+  project's own Test 8 measurements (`test-results.md`), flagged as a lower-rigor interim
   prior, not a literature citation.
 - Update channels: MediaPipe Hands.
 
@@ -149,20 +151,20 @@ adding it.
   forearm length ratio.
 - Distribution: Beta (angles) + lognormal (length), plus the three named cross-group covariance
   entries above — this group cannot be represented as independent per-DOF Beta marginals without
-  losing the tenodesis and swivel-angle relationships `problems2.md` requires.
+  losing the tenodesis and swivel-angle relationships `goals.md` requires.
 - Literature seed: wrist ROM ≈85°/85°, ≈15°/45°; elbow ≈90–110°; swivel-angle criterion
   (<5° error, reaching-task origin, untested for typing).
 - Update channels: forearm length — caliper, direct. Elbow flexion/swivel/forearm pronation — no
   data term, ever, under this project's scope; posterior moves only via the cross-group correlations
   above and manual numeric entry when supplied. Wrist flex/ext and radial/ulnar deviation — the same,
-  plus `problems2.md`'s weak composed MediaPipe-Hands observation (landmark-0 orientation, entered as
+  plus `goals.md`'s weak composed MediaPipe-Hands observation (landmark-0 orientation, entered as
   a term on wrist+forearm+elbow rotation summed, never decomposed; wide noise, never allowed to
   dominate the prior alone). Manual numeric entry, for any DOF in this group, is ingested exactly
   like a caliper or MediaPipe observation elsewhere in the model — its own noise variance set by how
   it was obtained (a goniometer reading behaves like a caliper measurement, a self-report carries
   wider noise), subject to the same exclusion/plausibility gate, never written to the posterior mean
   directly. Consumed by `ikSolve.ts` as a pose variable like every other group (see "Underspecified
-  DOF stay bounded" and the parameter-groups intro above) — also read by `key_point_selection.md`'s
+  DOF stay bounded" and the parameter-groups intro above) — also read by `key-point-selection.md`'s
   landmark-0 placement step, which is a second consumer of the same posterior, not a separate one.
 
 Groups E and F's "no literature found" status is a real gap, not a placeholder — flag it plainly in
@@ -172,7 +174,7 @@ code comments rather than inventing a citation.
 
 1. **Types.** `src/routes/scan3/lib/priors/handModel.ts` — `KinematicPriors`/`HandPriorState`:
    one struct spanning every group above, each entry a `PriorValue<T>` (mean, covariance, an
-   implicit confidence from that covariance's magnitude). This _is_ `iksolve_research.md`'s
+   implicit confidence from that covariance's magnitude). This _is_ `ik-solve-research.md`'s
    `KinematicPriors` interface, filled in rather than left as a sketch.
 
 2. **Seed data.** `src/routes/scan3/lib/priors/handModelData.ts` — the literature-cited numeric
@@ -187,7 +189,7 @@ code comments rather than inventing a citation.
    Gauss-Newton/Levenberg-Marquardt run every frame, on landmarks that have already passed through
    the existing `landmarkFilter.ts` despike + One Euro filter unchanged (that filter cleans the raw
    landmark signal itself and stays exactly where it is today, upstream of everything below, per
-   `iksolve_research.md`). Every other group (lengths, coupling coefficients) is a **constant** for
+   `ik-solve-research.md`). Every other group (lengths, coupling coefficients) is a **constant** for
    that frame, read from `HandPriorState`'s current mean — not a variable the per-frame solve
    touches. Their own updates happen only in stage 4, across many frames, which is what keeps this
    solve small enough to run in real time instead of growing into a 50+ DOF joint state estimate.
@@ -197,7 +199,7 @@ code comments rather than inventing a citation.
    - **Prior term**: for every pose angle, a Mahalanobis penalty pulling it toward that joint's
      current ROM/axis mean, weighted by that prior's inverse covariance. This single term is what
      makes a converged ROM behave like a near-hard limit and an unconverged one behave like almost no
-     constraint at all — continuously, with no discrete tiers, exactly as `problems2.md` requires.
+     constraint at all — continuously, with no discrete tiers, exactly as `goals.md` requires.
    - **ROM term**: negative log-density under each joint's Beta prior — a soft limit, not a clamp
      (folds into the prior term above; called out separately here since it's the mechanism, not a
      second penalty).
@@ -281,7 +283,7 @@ Unit-testable (pure functions, `bun:test`, same convention as `landmarkFilter.te
 Not unit-testable, and not attempted as such: whether the solver's live corrected pose _looks_ more
 anatomically plausible than raw tracking. That's the multi-view page's job — a human judgment call,
 the same role live capture pages already play for every other empirically-tuned parameter in this
-project (`test_results.md`'s Tests 6/7).
+project (`test-results.md`'s Tests 6/7).
 
 ## Non-goals (this plan)
 

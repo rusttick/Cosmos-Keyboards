@@ -1,7 +1,9 @@
 # Project goals and acceptance criteria (v2)
 
+> **Status:** Active spec · Supersedes: `archive/problems.md` · Depends on: none
+
 Re-statement of the project's objective and success criteria,
-written after the scan-tests research (`test_results.md`) and the IK design proposal (`iksolve_research.md`).
+written after the scan-tests research (`test-results.md`) and the IK design proposal (`ik-solve-research.md`).
 Supersedes the informal goal in earlier docs.
 
 ## Goal statement
@@ -115,7 +117,7 @@ Bone lengths (near-linear, largely independent-axis)
 update via straightforward recursive Bayesian estimation — a mean/covariance update per observation.
 
 Coupled, nonlinear joints (MCP's coupled axes, CMC's conjunct rotation)
-update via the same constrained MAP solve `iksolve_research.md` already specifies for live IK.
+update via the same constrained MAP solve `ik-solve-research.md` already specifies for live IK.
 Both read and write the same correlated (mean, covariance) state —
 
 there is exactly one place confidence lives, not a separate scheme per attribute type.
@@ -136,11 +138,11 @@ Named cross-group correlations the model must represent explicitly (not covered 
 - An observation from an excluded condition (dorsal, thumb-lateral, self-occluded)
   never enters the likelihood for that quantity, regardless of how many accumulate —
   this is what stops the posterior from confidently converging on a wrong value
-  (`iksolve_research.md`'s rejection of unsupervised self-calibration).
+  (`ik-solve-research.md`'s rejection of unsupervised self-calibration).
 
 - Every attribute is reported as its current posterior (mean + variance/covariance entry)
   plus its evidence (session count, source: population prior / MediaPipe Hands / caliper / manual entry) — never a bare point value.
 
 ## Keyboard design output — required attributes
 
-see key_point_selection.md
+see key-point-selection.md

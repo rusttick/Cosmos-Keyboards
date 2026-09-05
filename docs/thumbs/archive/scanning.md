@@ -1,5 +1,7 @@
 # Scanning process: extracting a richer kinematic model
 
+> **Status:** Archived, 2026-09-05 · Superseded by `../capture-protocol.md` (concrete protocol) and `../goals.md` (wrist/forearm treatment). Most concrete proposals here (discrete drag/block conditions, camera-calibration gesture, "rest flat on a desk") were revised in `../capture-protocol.md`'s finalized design; the "wrist is out of scope, manual-only forever" conclusion is superseded by `../goals.md`'s Group G section.
+
 `problems.md` established that most of what limits our current model — no ROM, no neutral-pose ground truth, no cross-finger coupling data — is a **scanning problem**, not a placement-algorithm problem. This doc works through how to get that data out of the hardware we actually have: a single fixed (or hand-holdable) camera, MediaPipe Hands, and a moving hand — no depth sensor, no force plate, no EMG.
 
 ## What we're working with

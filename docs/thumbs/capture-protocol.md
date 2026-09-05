@@ -1,6 +1,8 @@
 # Scan procedure: a capture protocol designed around MediaPipe Hands' actual failure modes
 
-This is the process document: for each capture, what position the hands are in, what's said to the user, what's recorded, what's calculated from it, and how the software knows a capture is done well enough to move on. Implementation details — data structures, module boundaries, storage — belong in `scan3.md`, kept separate from process.
+> **Status:** Active spec · Supersedes: `archive/scanning.md` · Depends on: `archive/problems.md` (biomechanical grounding)
+
+This is the process document: for each capture, what position the hands are in, what's said to the user, what's recorded, what's calculated from it, and how the software knows a capture is done well enough to move on. Implementation details — data structures, module boundaries, storage — belong in `scan3-architecture.md`, kept separate from process.
 
 The organizing constraint behind every decision below: MediaPipe Hands is not uniformly reliable across viewing angles. Its two failure modes are different in kind, and the protocol has to answer them differently:
 
@@ -124,4 +126,4 @@ No fixture constrains a forearm well enough to measure wrist articulation direct
 - [Functional ranges of motion of the wrist joint — PubMed](https://pubmed.ncbi.nlm.nih.gov/1861019/)
 - [Effect of Wrist Posture on Carpal Tunnel Pressure While Typing — PubMed](https://pubmed.ncbi.nlm.nih.gov/18383144/)
 
-See also `docs/thumbs/scanning.md` and `docs/thumbs/problems.md` for the biomechanical grounding (RSI risk factors, ROM literature, minimum-jerk motor control, enslaving) this protocol fills in, and `docs/thumbs/scan3.md` for the implementation architecture — not yet updated to match this revision.
+See also `docs/thumbs/scanning.md` and `docs/thumbs/problems.md` for the biomechanical grounding (RSI risk factors, ROM literature, minimum-jerk motor control, enslaving) this protocol fills in, and `docs/thumbs/scan3-architecture.md` for the implementation architecture — not yet updated to match this revision.

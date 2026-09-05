@@ -1,5 +1,7 @@
 # Sweep-region preview: a read-only viewer for fingertip reachable-surface data
 
+> **Status:** Archived, 2026-09-05 · Superseded by `../scan-utility-evaluation.md`, which explicitly says so and reuses this doc's point-cloud sampling approach as internal plumbing rather than a standalone deliverable.
+
 `pre-development-work.md` scoped the constraint-based placement UI (§3) as the least-designed, highest-risk piece of the whole project, and explicitly deferred it. This doc is a smaller, earlier step: a **read-only** page that takes today's scanned hand model and draws each finger's reachable-surface as a 3D object, so scan-quality improvements (ROM, per-tier comfortable/full ranges, enslaving, once they land per `scanning.md`) have somewhere to be _seen_ immediately, without waiting on any placement algorithm to exist. No editing, no key placement, no persistence beyond what already exists — just visualization.
 
 ## What already exists to build on

@@ -1,5 +1,7 @@
 # Pre-development work: what's needed before implementation begins
 
+> **Status:** Archived, 2026-09-05 · Superseded by `../scan3-architecture.md` and `../average-hand.md`. Written before the probabilistic `HandPriorState`/`ikSolve.ts` architecture existed; its schema/sequencing plan targets a plain deterministic `HandData` extension and references a deleted `plan1.md`.
+
 `problems.md` and `scanning.md` establish _what_ we now believe is worth measuring and _why_ — grounded in the actual limits of MediaPipe Hands, a single fixed camera, and real biomechanics literature.
 
 None of that is implementation-ready yet. This doc is the checklist for closing the gap between "we know what we want to measure" and "we can start writing code" — four distinct gaps, each with its own deliverable, none of which is code.

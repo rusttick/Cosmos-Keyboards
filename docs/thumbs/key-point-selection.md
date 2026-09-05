@@ -1,6 +1,8 @@
 # Key point selection: generating key datums from the posterior hand model
 
-`problems2.md` establishes the hand model this doc consumes:
+> **Status:** Active spec · Depends on: `goals.md`, `scan-utility-evaluation.md`
+
+`goals.md` establishes the hand model this doc consumes:
 a correlated posterior (mean + covariance) over bone lengths, per-joint-type motion parameters, and cross-finger coupling,
 each seeded from a literature prior and narrowed by measurement.
 
@@ -20,7 +22,7 @@ Every finger's FK chain hangs off landmark 0 (the wrist).
 Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different kinds of quantity, not one:
 
 - **Rotational (3 DOF): wrist flexion/extension, wrist radial/ulnar deviation, forearm pronation/supination.**
-  These are hand-intrinsic and belong in the hand-model posterior (`problems2.md`'s "Wrist and proximal arm" entry) exactly like any other joint:
+  These are hand-intrinsic and belong in the hand-model posterior (`goals.md`'s "Wrist and proximal arm" entry) exactly like any other joint:
   population-seeded (wrist ROM ≈85° flex/ext, ≈15°/45° radial/ulnar deviation),
   and _coupled_ — flexion/extension and radial/ulnar deviation are not independent
   (the natural "dart-throwing motion" plane pairs extension with radial deviation and flexion with ulnar deviation),
@@ -33,12 +35,12 @@ Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different k
   and a **force-availability cost** (derived from the same tendon force-length relationship,
   penalizing wrist angles that leave a finger's press force too low) —
   this is a real tradeoff to expose to the packing cost, not something to resolve by fiat toward "neutral."
-  Per `problems2.md`, none of these three DOF can be individually decomposed from a single MediaPipe Hands reading
+  Per `goals.md`, none of these three DOF can be individually decomposed from a single MediaPipe Hands reading
   (no forearm-referenced landmark exists, and MediaPipe Pose is out of scope for this project) —
   but they are not frozen at the literature prior for that reason.
   They are ordinary pose variables in the same `ikSolve.ts`-maintained `HandPriorState` every finger joint lives in
-  (`average_hand.md`'s "Underspecified DOF stay bounded" — an always-occluded node, not a structurally separate one),
-  and narrow through three channels: `problems2.md`'s weak composed landmark-0 observation
+  (`average-hand.md`'s "Underspecified DOF stay bounded" — an always-occluded node, not a structurally separate one),
+  and narrow through three channels: `goals.md`'s weak composed landmark-0 observation
   (a term on combined wrist+forearm+elbow rotation, never assigned to one DOF),
   the named cross-group correlations (tenodesis links wrist angle to whatever finger rest-posture data has already converged;
   the swivel-angle criterion links elbow angle to forearm length and wrist pose), and manual numeric entry when supplied
@@ -52,7 +54,7 @@ Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different k
   and the literature treats "hand/wrist displacement" as a separate measured quantity from joint kinematics for exactly this reason.
   It has no population-ROM-style prior;
   treat it as a free design variable bounded only by loose practical reach limits
-  (softly informed by the forearm-length and elbow/swivel-angle prior in `problems2.md`,
+  (softly informed by the forearm-length and elbow/swivel-angle prior in `goals.md`,
   which bounds where an elbow could plausibly be even though it's never directly tracked), not by any published "ideal" value.
 
 - **Deliberately excluded:** none of the published split-angle/gable-angle/slope-angle recommendations
@@ -70,7 +72,7 @@ Its pose relative to the keyboard has 6 DOF, and those 6 DOF are two different k
 
 ## Candidate space per finger, per joint type (not a uniform DOF count)
 
-Each finger's free parameters come from `problems2.md` §2.2, not a flat "N DOF per finger" assumption:
+Each finger's free parameters come from `goals.md` §2.2, not a flat "N DOF per finger" assumption:
 
 - **PIP, DIP**: true 1-DOF hinges.
   DIP is not sampled as an independent dimension — it is derived from PIP via that finger's own `fitDipPipCoupling` posterior
@@ -178,12 +180,12 @@ including one that doesn't decompose into "one region per finger" at all.
 - A design produced before every joint's posterior has converged is not a failure state:
   candidates drawn from a wide posterior simply carry larger positional uncertainty and wider exclusion margins,
   biasing the packing toward the population-prior-consistent placement until real measurement narrows it —
-  this is `problems2.md`'s confidence-aware degradation requirement,
+  this is `goals.md`'s confidence-aware degradation requirement,
   satisfied by this algorithm rather than bolted on after it.
 
 ## Relationship to other docs
 
-- Consumes `problems2.md`'s hand-model posterior
+- Consumes `goals.md`'s hand-model posterior
   (bone lengths, per-joint-type motion model, wrist/forearm rotational state, coupling, update mechanism)
   as its only upstream dependency.
 
@@ -191,10 +193,10 @@ including one that doesn't decompose into "one region per finger" at all.
   coupled MCP axes, and a movable landmark-0 base frame before Steps 0–1 are buildable —
   a prerequisite change, not scoped by this doc.
 
-- Reuses the Jacobian/manipulability construction from `scan_utility_evaluation.md`'s Category 2 machinery —
+- Reuses the Jacobian/manipulability construction from `scan-utility-evaluation.md`'s Category 2 machinery —
   same computation, used here as a selection input rather than an evaluation report.
 
-- Feeds `pre-development-work.md` §3's constraint-based placement UI:
+- Feeds `archive/pre-development-work.md` §3's constraint-based placement UI:
   this algorithm produces candidate key datums (with their confidence) for that UI's interactive review layer, not a replacement for it.
 
 ## Sources
