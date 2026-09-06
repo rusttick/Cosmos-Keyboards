@@ -113,17 +113,23 @@ const boneLengths: BoneLengthPriors = {
   },
   fingers: {
     // The thumb's leading 'wristToCmc' segment has no anatomical bone and no literature source (see
-    // comment above) -- it's given a small made-up mean and a wide standard deviation here, and needs
-    // to be replaced by this project's own measurement before it's trusted for anything. The other
-    // three segments are real Buryanov & Kotiuk transcriptions, same as every other finger.
+    // comment above) -- it's given a made-up mean and a wide standard deviation here, and needs to be
+    // replaced by this project's own measurement before it's trusted for anything. The other three
+    // segments are real Buryanov & Kotiuk transcriptions, same as every other finger.
     thumb: (() => {
       const sourced = vectorPriorFromRatios(
         ['metacarpal', 'proximal', 'distal'],
         HAND_LENGTH_MM,
         [M.thumb, PP.thumb, combineSoftTissue(PD.thumb, TIP.thumb)],
       )
-      const UNSOURCED_WRIST_TO_CMC_MEAN = 0.05
-      const UNSOURCED_WRIST_TO_CMC_SD = 0.03
+      // Was 0.05 (≈8mm) -- visibly too short against a MediaPipe hand-landmark reference diagram
+      // (docs/thumbs/mediapipe_hand_reference.png), where this segment reads as roughly 65-70% of the
+      // thumb metacarpal segment (1→2) that follows it, not a small fraction of it. Re-eyeballed
+      // against that proportion and multi-view's "model rest" tile (docs/thumbs/model_rest_1.png,
+      // 2026-09-06) to ~0.19 (≈30mm) -- still no cited source, just a better-looking placeholder;
+      // widened SD reflects that this is still a guess, only a re-centered one.
+      const UNSOURCED_WRIST_TO_CMC_MEAN = 0.19
+      const UNSOURCED_WRIST_TO_CMC_SD = 0.05
       return {
         segments: ['wristToCmc', ...sourced.segments],
         mean: [UNSOURCED_WRIST_TO_CMC_MEAN, ...sourced.mean],
@@ -131,7 +137,7 @@ const boneLengths: BoneLengthPriors = {
           [UNSOURCED_WRIST_TO_CMC_SD ** 2, 0, 0, 0],
           ...sourced.covariance.map(row => [0, ...row]),
         ],
-        source: `${sourced.source}; leading segment (wristToCmc) is a made-up placeholder, not from any source`,
+        source: `${sourced.source}; leading segment (wristToCmc) is a made-up placeholder (re-eyeballed 2026-09-06, see inline comment), not from any source`,
       }
     })(),
     indexFinger: vectorPriorFromRatios(
@@ -203,7 +209,13 @@ const mcpAxes: McpAxisPriors = Object.fromEntries(
 const cmcMobility: CmcMobilityPriors = {
   thumb: {
     flexExtRom: rom(0, 53, 53, 10, ROUGH_ROM_SOURCE),
-    abAdRom: rom(0, 42, 42, 10, ROUGH_ROM_SOURCE),
+    // minDeg was 0 -- a hard floor with no room for adduction past whatever "neutral" 0 represents,
+    // which real thumb CMCs do have a small range of (confirmed as a real gap while eyeballing
+    // multi-view's static reference pose against docs/thumbs/mediapipe_hand_reference.png,
+    // 2026-09-06: a plausible-looking rest stance needed roughly -10deg here). Widened to -15 for a
+    // small margin past that, not a specific measured limit -- still ROUGH_ROM_SOURCE, just less
+    // artificially one-sided than before.
+    abAdRom: rom(-15, 42, 42, 10, ROUGH_ROM_SOURCE),
     conjunctCoupling: {
       mean: [0, 0],
       covariance: [[1, 0], [0, 1]],

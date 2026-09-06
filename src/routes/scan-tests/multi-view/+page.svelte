@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import createDetector, { type Detector } from '../lib/detector'
   import { type Handedness } from '../lib/orientation'
   import {
@@ -8,35 +8,43 @@
     drawHandOverlay,
     drawSkeletonView,
     lookAtBasis,
+    projectCorrectedOntoKeypoints,
   } from '../lib/overlay'
   import { DEFAULT_ONE_EURO_OPTIONS } from '../lib/landmarkFilter'
   import { palmBasisAxes } from '$lib/hand'
   import { Vector3 } from 'three'
   import {
     buildDefaultSkeleton,
+    buildRestExtensionPose,
+    buildRestExtensionSkeleton,
     poseConfidenceSdDeg,
     poseToLandmarkVectors,
     solvePose,
   } from '../../scan3/lib/priors/ikSolve'
   import { HAND_PRIOR_SEED } from '../../scan3/lib/priors/handModelData'
 
-  // The center tile is the real video + overlay (like thumb-cmc's normal arrow); the 8 side tiles are
-  // pure reconstructed-skeleton views, no video, so a monocular depth-estimation error that's
-  // invisible looking down the same axis the camera measures along shows up as an implausible shape
-  // from another angle. See docs/thumbs/test_results.md's denoising/multi-view design entry.
+  // The center tile is the real video with the corrected/model-solved hand projected on top of it (an
+  // orthographic approximation -- see projectCorrectedOntoKeypoints's doc comment -- since this
+  // project has no real camera projection to invert), so it answers "does the solved model look like
+  // the real hand" directly, at the actual video frame. tile0 (top-left) is a fixed, never-tracked
+  // "model rest" reference -- the prior's bone lengths and ROM alone, in a static maximum-extension
+  // pose, for auditing those by eye independent of any live capture (see restSkeleton/restPose below).
+  // The remaining 7 tiles are pure reconstructed-skeleton views of the live corrected model, no video,
+  // so a monocular depth-estimation error that's invisible looking down the same axis the camera
+  // measures along shows up as an implausible shape from another angle. See
+  // docs/thumbs/test_results.md's denoising/multi-view design entry.
   //
-  // View naming/geometry follows FreeCAD's Standard Views convention (View > Standard views, keyboard
-  // shortcuts 0/1-6: Isometric, Front, Top, Right, Rear, Bottom, Left -- confirmed against
-  // wiki.freecad.org/Std_View_Menu and Std_ViewFront's own doc, 2026-09). The live palm-plane normal
-  // `N` plays the role of that reference frame's local Z (up) axis -- so, matching how a real
-  // FreeCAD/engineering-drawing view cube behaves, N renders pointing straight up in Front/Rear/
-  // Right/Left (all four are "elevation" views where the model's up axis is vertical on screen),
-  // toward the viewer in Top (looking down at the object from above, its up axis pokes out of the
-  // page), and away from the viewer in Bottom (looking up from below, up axis recedes into the page).
-  // Dimetric fills the 8th grid slot FreeCAD itself doesn't assign a numeric shortcut to. The
-  // reference frame's X/Y axes are the hand's own `palmBasisAxes().left`/`.up` (not an arbitrary
-  // externally-referenced pair) -- see tileViewBases's doc comment for why that's what keeps all 3
-  // drawn axes fixed in every view, not just the normal.
+  // Those 7 live tiles' naming/geometry follows FreeCAD's Standard Views convention (View > Standard
+  // views, keyboard shortcuts 1-6: Front, Top, Right, Rear, Bottom, Left, plus Dimetric to fill the
+  // grid -- confirmed against wiki.freecad.org/Std_View_Menu and Std_ViewFront's own doc, 2026-09).
+  // The live palm-plane normal `N` plays the role of that reference frame's local Z (up) axis -- so,
+  // matching how a real FreeCAD/engineering-drawing view cube behaves, N renders pointing straight up
+  // in Front/Rear/Right/Left (all four are "elevation" views where the model's up axis is vertical on
+  // screen), toward the viewer in Top (looking down at the object from above, its up axis pokes out of
+  // the page), and away from the viewer in Bottom (looking up from below, up axis recedes into the
+  // page). The reference frame's X/Y axes are the hand's own `palmBasisAxes().left`/`.up` (not an
+  // arbitrary externally-referenced pair) -- see tileViewBases's doc comment for why that's what keeps
+  // all 3 drawn axes fixed in every view, not just the normal.
   const STALL_RESET_SECONDS = 3
 
   // average-hand.md Stage 6: this page never writes to HandPriorState, so it's loaded once here as a
@@ -45,22 +53,26 @@
   // no per-user calibration behind it either (see buildDefaultSkeleton's own doc comment) -- this page
   // is meant for watching how the *model* constrains a frame, not for judging a specific hand's fit.
   const priorSnapshot = HAND_PRIOR_SEED
-  const skeleton = buildDefaultSkeleton(priorSnapshot)
-  // Confidence doesn't change frame to frame (this page never updates the prior), so it's computed
-  // once rather than recomputed every frame alongside the pose itself.
-  const confidenceSdDeg = poseConfidenceSdDeg(skeleton, priorSnapshot)
-  // Same opacity mapping for every landmark: more confident (lower sdDeg) draws more solid, an
-  // unmodeled joint (undefined) draws at a fixed dim opacity distinct from both ends, so it reads as
-  // "no belief here" rather than "very confident" or "very uncertain." 60deg is this page's own
-  // chosen reference scale, not a cited threshold -- live-tune like every other display constant in
-  // this project's test pages if it doesn't read clearly against real capture.
   const MAX_SD_DEG_FOR_OPACITY = 60
   const UNMODELED_OPACITY = 0.25
   function opacityFromSdDeg(sdDeg: number | undefined): number {
     if (sdDeg === undefined) return UNMODELED_OPACITY
     return Math.max(0.15, 1 - sdDeg / MAX_SD_DEG_FOR_OPACITY)
   }
-  const landmarkOpacity = confidenceSdDeg.map(opacityFromSdDeg)
+
+  // Fixed camera basis, chosen directly in the rest skeleton's own local axes -- NOT derived from any
+  // live `axes`/tileViewBases, since this tile is defined to never move regardless of the live tracked
+  // hand. At `restPose` (every flex angle at its own ROM minimum, i.e. maximally extended), every
+  // landmark's reach direction has zero Y-component (flexion is the only DOF that moves a landmark
+  // into Y -- see `trackedPose`'s angleZ/angleY convention in ikSolve.ts), so the whole hand lies in
+  // the local X-Z plane; looking along Y views that plane face-on, palm-first. `right`/`up`'s
+  // handedness (`cross(right, up)` = +Y) is chosen so that a positive MCP flexion angle -- which
+  // rotates the reach direction toward +Y, per the same convention -- curls fingers toward the camera,
+  // i.e. +Y is the palmar side: BEST-GUESS SIGN CONVENTION, not yet verified against a real capture
+  // (same caveat as `$lib/hand.ts`'s `signedJointAngle` doc comment) -- if this renders back-of-hand
+  // instead of palm, flip `right`'s sign here, nothing else. Unrelated to `handedness` (Left/Right) --
+  // this is the camera's own fixed viewing basis, never mirrored.
+  const REST_VIEW_BASIS = { right: new Vector3(0, 0, 1), up: new Vector3(1, 0, 0) }
 
   let video: HTMLVideoElement
   let centerCanvas: HTMLCanvasElement
@@ -95,20 +107,77 @@
 
   $: noHandDetected = running && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
 
-  /** One entry per tile: FreeCAD's own name/shortcut number (undefined for Dimetric, which FreeCAD
-   * itself doesn't assign a digit to), the viewing direction as coefficients on the local {X, Y, Z=N}
-   * frame built in tileViewBases, and whether the normal degenerates to a point in this view (Top and
-   * Bottom look straight down/up the Z=N axis itself). Grid position mirrors an "unfolded cube net"
-   * around the center (real-camera) tile: Top above it, Bottom below, Left/Right beside it, the four
-   * corners for Front/Rear/Isometric/Dimetric -- see the template below for which tile index lands
-   * where in the 3x3 grid. */
+  // `skeleton` must be built with the REAL tracked hand's own handedness -- buildDefaultSkeleton's
+  // joint-0 splay is chirality-dependent (see its own doc comment: confirmed live, 2026-09-06, a real
+  // Right hand solved against the wrong fixed convention put the thumb on the pinky side). `handedness`
+  // here is exactly the value used to select `hands[handedness]` in the capture loop below, so this
+  // always matches whichever hand is actually being solved.
+  $: skeleton = buildDefaultSkeleton(priorSnapshot, handedness)
+  // Confidence doesn't change frame to frame (this page never updates the prior) beyond following
+  // `skeleton`'s own handedness switch, so it's a reactive derivation rather than a per-frame one.
+  $: confidenceSdDeg = poseConfidenceSdDeg(skeleton, priorSnapshot)
+  // Same opacity mapping for every landmark: more confident (lower sdDeg) draws more solid, an
+  // unmodeled joint (undefined) draws at a fixed dim opacity distinct from both ends, so it reads as
+  // "no belief here" rather than "very confident" or "very uncertain." 60deg is this page's own
+  // chosen reference scale, not a cited threshold -- live-tune like every other display constant in
+  // this project's test pages if it doesn't read clearly against real capture.
+  $: landmarkOpacity = confidenceSdDeg.map(opacityFromSdDeg)
+
+  // The static "model rest" tile (replacing the old live Isometric view): a fixed, never-tracked
+  // rendering of the prior model itself -- bone lengths and joint ROM, not any particular captured
+  // frame -- for auditing those in isolation from live-tracking noise or orientation. `handedness` is
+  // the one thing that can change these: mirrored to the opposite hand's shape (see
+  // buildRestExtensionSkeleton/Pose's own doc comments -- a left hand really is a right hand's mirror
+  // image), and only when the dropdown changes (never mid-track, never per-frame). Unlike every other
+  // tile, this one needs `buildRestExtensionSkeleton`, not the shared `skeleton` -- see that function's
+  // own doc comment for why `buildDefaultSkeleton` alone (identity per-joint splay) can't produce a
+  // legible palm shape no matter which pose is fed to it (confirmed directly in ikSolve.test.ts).
+  $: restSkeleton = buildRestExtensionSkeleton(priorSnapshot, handedness)
+  $: restPose = buildRestExtensionPose(priorSnapshot, handedness)
+  $: restVectors = poseToLandmarkVectors(restSkeleton, restPose)
+  $: restHand = { vectors: restVectors }
+  $: restAxes = palmBasisAxes(restVectors, handedness)
+
+  function drawRestTile() {
+    if (!tile0) return
+    const refLen = restVectors[0].distanceTo(restVectors[9]) || 1
+    const tileSize = Math.min(tile0.width, tile0.height) || 200
+    const scale = (tileSize * 0.4) / refLen
+    // At `restPose` every finger reaches away from the wrist in only one screen direction (up, given
+    // REST_VIEW_BASIS.up = local +X, the reach axis) -- same one-directional-extent issue the live
+    // Top/Bottom tiles have, fixed the same way: pin the wrist near the bottom edge instead of dead
+    // center, so the whole tile height is available to the fingers' one actual direction of travel.
+    const origin = { x: tile0.width / 2, y: tile0.height - 10 }
+    drawSkeletonView(tile0, restHand, undefined, REST_VIEW_BASIS, scale, {
+      label: 'Model rest (fixed)',
+      landmarkOpacity,
+      origin,
+    })
+    drawAxisTriad(tile0, restHand, restAxes, REST_VIEW_BASIS, origin)
+  }
+  onMount(drawRestTile)
+  // Redraws only on a handedness change (via restAxes), never on a live-tracking frame -- this tile is
+  // defined to never move once drawn, per multi-view's static-reference requirement.
+  $: if (tile0) {
+    restAxes
+    drawRestTile()
+  }
+
+  /** One entry per LIVE tile (tile0 is the fixed "model rest" reference, handled separately -- see
+   * `restSkeleton`/`drawRestTile` above/below): FreeCAD's own name/shortcut number (undefined for
+   * Dimetric, which FreeCAD itself doesn't assign a digit to), the viewing direction as coefficients
+   * on the local {X, Y, Z=N} frame built in tileViewBases, and whether the normal degenerates to a
+   * point in this view (Top and Bottom look straight down/up the Z=N axis itself). Grid position
+   * mirrors an "unfolded cube net" around the center (real-camera) tile: Top above it, Bottom below,
+   * Left/Right beside it, the four corners for the fixed rest tile/Front/Rear/Dimetric -- see the
+   * template below for which tile index lands where in the 3x3 grid. Index `i` here maps to
+   * `tileCanvases[i + 1]` (tile0 is not one of these 7).*/
   // `degenerate` marks the 2 views where the normal looks straight along its own axis (Top/Bottom) --
   // documentation only now that drawAxisTriad handles every axis' near-zero-length case generically
   // (a small dot instead of an arrow with an undefined direction), rather than drawSkeletonView's
   // normal-specific throughScreen glyph this page used before adding the other 2 axes.
   const VIEWS: { number?: number; name: string; xyz: [number, number, number]; degenerate?: boolean }[] =
     [
-      { number: undefined, name: 'Isometric*', xyz: [-1, 1, -1] }, // tile0, top-left corner
       { number: 2, name: 'Top', xyz: [0, 0, -1], degenerate: true }, // tile1, above center
       { number: 1, name: 'Front', xyz: [0, 1, 0] }, // tile2, top-right corner
       { number: 6, name: 'Left', xyz: [1, 0, 0] }, // tile3, left of center
@@ -219,26 +288,30 @@
         lastFrameAt = elapsed
         staleResetAttempted = false
 
-        drawHandOverlay(centerCanvas, hand.hand.keypoints)
-        // The center tile stays a live view of the *raw* tracked hand -- it's the ground-truth
-        // reference the 8 corrected tiles are checked against, not the "final answer" the model
-        // produces (see below). Its own axis triad is computed from raw data on purpose, unchanged.
-        // The 3 raw makeBasis() vectors (not hand.basis's own relabeled/permuted output -- see
-        // palmBasisAxes's doc comment in $lib/hand.ts). Single source of truth for all 3 axes on
-        // every tile below, center included, instead of the center tile computing its normal via a
-        // separately-maintained formula (orientation.ts's handPlaneNormal(), which happens to compute
-        // the same vector today, but duplicated formulas are exactly what caused the two-conventions
-        // bug documented in test_results.md's 2026-09-02 entry).
-        const rawAxes = palmBasisAxes(hand.vectors, hand.handedness)
-        drawAxisTriadOverlay(centerCanvas, hand.hand.keypoints, rawAxes)
-
-        // average-hand.md Stage 6: what the 8 side tiles render is always this model-constrained
-        // solve against `priorSnapshot`, never the raw tracked frame directly -- the whole point of
-        // this page is watching whether the model keeps a corrupted or occluded frame from visibly
-        // distorting the displayed hand, which isn't visible if the raw reading is what's drawn.
+        // average-hand.md Stage 6: what every tile renders (center included, as of this comparison
+        // pass) is always this model-constrained solve against `priorSnapshot`, never the raw tracked
+        // frame directly -- the whole point of this page is watching whether the model keeps a
+        // corrupted or occluded frame from visibly distorting the displayed hand, which isn't visible
+        // if the raw reading is what's drawn.
         const solved = solvePose(skeleton, priorSnapshot, hand)
         const correctedVectors = poseToLandmarkVectors(skeleton, solved.pose)
         const axes = palmBasisAxes(correctedVectors, hand.handedness)
+
+        // Center tile: the corrected/model-solved hand, projected onto the real video via
+        // `projectCorrectedOntoKeypoints`'s orthographic approximation -- so this tile answers "does
+        // the solved model actually look like the real tracked hand," which the old raw-keypoints
+        // overlay here couldn't (it only ever showed the *raw* tracker's own opinion of itself). This
+        // is deliberately the CURRENT, un-fixed `buildDefaultSkeleton` (identity per-joint splay,
+        // known-degenerate palm normal) -- the "before" half of a before/after comparison once that
+        // splay gets a real fix, not yet that fix itself.
+        const correctedKeypoints = projectCorrectedOntoKeypoints(
+          hand,
+          correctedVectors,
+          centerCanvas.width,
+          centerCanvas.height
+        )
+        drawHandOverlay(centerCanvas, correctedKeypoints)
+        drawAxisTriadOverlay(centerCanvas, correctedKeypoints, axes)
 
         if (elapsed - lastDisplayUpdate >= displayRefreshIntervalSeconds) {
           lastDisplayUpdate = elapsed
@@ -250,7 +323,7 @@
         // the rendered hand stays a stable size across frames instead of auto-fitting -- and so
         // jarringly resizing -- every tile every frame.
         const refLen = correctedVectors[0].distanceTo(correctedVectors[9]) || 1
-        const tileSize = Math.min(tile0?.width || 0, tile0?.height || 0) || 200
+        const tileSize = Math.min(tile1?.width || 0, tile1?.height || 0) || 200
         const scale = (tileSize * 0.4) / refLen
 
         // drawSkeletonView draws just the skeleton here (no normal arrow of its own -- `normal` is
@@ -262,12 +335,25 @@
         const correctedHand = { vectors: correctedVectors }
         const bases = tileViewBases(axes)
         bases.forEach((cam, i) => {
-          const canvas = tileCanvases[i]
+          // VIEWS[i] maps to tileCanvases[i + 1] -- tile0 is the fixed "model rest" reference, not one
+          // of these 7 live views (see restSkeleton/drawRestTile above).
+          const canvas = tileCanvases[i + 1]
           if (!canvas) return
           const view = VIEWS[i]
           const label = view.number !== undefined ? `${view.number} ${view.name}` : view.name
-          drawSkeletonView(canvas, correctedHand, undefined, cam, scale, { label, landmarkOpacity })
-          drawAxisTriad(canvas, correctedHand, axes, cam)
+          // Top and Bottom look straight down/up the palm normal, so every finger projects toward one
+          // side of a wrist-centered origin and the other half of the tile sits empty -- worse, a
+          // reasonably-sized hand's fingers get clipped against the edge they extend toward. Pinning
+          // the wrist ~10px above the bottom edge instead gives the whole tile height to the fingers'
+          // one actual direction of travel in these two views only; every other view keeps the
+          // wrist-centered default, where the hand extends in both directions from it.
+          const origin = view.degenerate ? { x: canvas.width / 2, y: canvas.height - 10 } : undefined
+          drawSkeletonView(canvas, correctedHand, undefined, cam, scale, {
+            label,
+            landmarkOpacity,
+            origin,
+          })
+          drawAxisTriad(canvas, correctedHand, axes, cam, origin)
         })
       })
       .catch((e) => console.error(e))
@@ -289,25 +375,6 @@
 <main class="w-full my-8 px-4">
   <div class="max-w-3xl">
     <h1 class="text-2xl font-semibold mb-4">Multi-View: FreeCAD-Style Palm-Normal-Locked Views</h1>
-    <p class="mb-6 text-sm text-gray-300">
-      The video-overlay skeleton looks smooth and plausible, but a monocular reconstruction error
-      (especially in depth, MediaPipe's weakest axis) can be invisible from the same angle the camera
-      measures along and obvious from any other. The center tile is the real video + overlay, exactly
-      like the other capture pages -- the raw reference to compare against. The 8 surrounding tiles
-      render this project's hand-prior-model-corrected reconstruction (<code>ikSolve.ts</code>'s solve
-      against a fixed, literature-seeded <code>HandPriorState</code>), never the raw tracked frame
-      directly, from FreeCAD's Standard Views (View &gt; Standard views, keyboard shortcuts 0/1-6) --
-      Isometric, Front, Top, Right, Rear, Bottom, Left, plus Dimetric to fill the grid -- built around
-      the live palm-plane normal playing the role of that reference frame's local up (Z) axis. The whole
-      set of views rotates together with the hand (locked to the live normal) rather than staying fixed
-      relative to the real camera. Every tile also draws the hand's full orientation frame as a
-      color-coded arrow triad (cyan = palm-plane normal, amber = the 0→5 axis, pink = their cross
-      product), rooted at the wrist -- watch whether it stays rigidly attached to the visible hand motion
-      (a stable orientation frame) or visibly twists on its own (the frame itself drifting), and whether
-      a corrupted or occluded frame fails to visibly distort the corrected hand the way it would the raw
-      one. Each landmark's dot opacity reflects the model's current confidence in it -- this page never
-      updates that belief, so watch the pose, not the opacity, change frame to frame.
-    </p>
 
     {#if error}
       <div class="mb-4 bg-red-400/30 px-4 py-3 rounded" role="alert">
@@ -388,19 +455,6 @@
       </p>
       <p>
         Model correction residual: {currentResidual !== undefined ? currentResidual.toFixed(2) : '—'}
-      </p>
-      <p class="text-xs text-gray-400">
-        Numeric display refreshes at ~{DEFAULT_ONE_EURO_OPTIONS.minCutoff.toFixed(2)} Hz -- tied to the One
-        Euro min cutoff (this page has no tuning UI; see flexion-sweep for that). The 8 side tiles redraw
-        every frame regardless -- they're visual renders, not numeric readouts. What they render is always
-        the solve against the literature-seed `HandPriorState` below, corrected from this frame's raw tracking
-        -- never the raw reading itself (the center tile is the raw reference to compare against). Each joint's
-        dot opacity reflects how confident that belief currently is (solid = converged/tight, faint = still
-        wide, dimmest = no belief modeled for that joint at all yet) -- this page never narrows those beliefs
-        itself, so opacity stays fixed for the whole session, only the pose moves. "Residual" is how far the
-        corrected pose still sits from the raw tracked frame -- near zero means the prior barely had to correct
-        anything; large means either this frame's tracking looks bad, or the literature prior doesn't fit
-        this particular hand well.
       </p>
       {#if noHandDetected}
         <p class="text-amber-400 font-semibold">

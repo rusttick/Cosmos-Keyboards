@@ -99,17 +99,49 @@ function emptyPose(): Pose {
 /** This project's hand-tracking skeleton represents the thumb with one extra joint (a
  * wrist-to-thumb-base segment with no real bone behind it) and gives its base joint (the true CMC) two
  * driven axes plus a derived twist, where index/middle's own base segment is rigid (no real rotation of
- * its own) and their knuckle has two driven axes without a twist. Ring and pinky are the other
- * exception to that rigid base segment: each flexes a small, independent amount of its own toward the
- * palm (see `calculateJoints`'s own doc comment in `hand.ts`), so their base segment gets one driven
- * axis instead of none. Everything past that (what this project's own tooling already calls the
- * thumb's "MCP" and "IP", by the same generic joint-position convention flexion-fitting code elsewhere
- * uses) is a plain one-axis hinge, same as the other fingers' two outer joints. */
+ * its own). Ring and pinky are the other exception to that rigid base segment: each flexes a small,
+ * independent amount of its own toward the palm (see `calculateJoints`'s own doc comment in `hand.ts`),
+ * so their base segment gets one driven axis instead of none. Everything past that (what this
+ * project's own tooling already calls the thumb's "MCP" and "IP", by the same generic joint-position
+ * convention flexion-fitting code elsewhere uses) is a plain one-axis hinge, same as the other fingers'
+ * two outer joints.
+ *
+ * Every non-thumb finger's knuckle (MCP) is `degree: 3`, the same shape as the thumb CMC: two driven
+ * axes (flexion, ab/ad) plus a derived third rotation -- `goals.md`'s documented flexion-phase-dependent
+ * axial twist (4D-CT studies: e.g. the index finger pronates through early flexion, supinates through
+ * late flexion), read from `mcpAxes[finger].axialRotationWeight` in `buildDefaultSkeleton` below via the
+ * exact same `ConjunctCoupling` mechanism `$lib/hand.ts`'s `fkBy`/`fromLimbs` already implement
+ * generically for any `degree: 3` joint -- not a new FK case, just a new caller of the existing one.
+ * `calculateJoints`'s real per-user fitting (producing a `degree: 3` MCP with a *fitted*, not seeded,
+ * `axialRotationWeight`/`conjunctCoupling` from captured motion, the way `thumbCmc.ts` does for the CMC)
+ * is a separate, larger task this doesn't attempt -- every real scan still produces `degree: 2` MCP
+ * joints today, so this only takes effect for `buildDefaultSkeleton`'s population-prior fallback until
+ * that fitting exists. */
 function degreesFor(finger: Finger): (0 | 1 | 2 | 3)[] {
   if (finger === 'thumb') return [0, 3, 1, 1]
-  if (finger === 'ringFinger' || finger === 'pinky') return [1, 2, 1, 1]
-  return [0, 2, 1, 1]
+  if (finger === 'ringFinger' || finger === 'pinky') return [1, 3, 1, 1]
+  return [0, 3, 1, 1]
 }
+
+/** Joint-0 splay shared by `buildDefaultSkeleton` and `buildRestExtensionSkeleton`: how much each
+ * non-thumb finger's base fans out from a pure collinear reach, as a fraction of `KNUCKLE_FAN_DEG`,
+ * and (via `THUMB_SPLAY_DEG` below) how far the thumb splays from that same row. A fixed display/model
+ * convention with no anatomical citation behind it -- see `buildDefaultSkeleton`'s own doc comment for
+ * why it exists and why it isn't itself a `HandPriorState` entry -- fanned symmetrically around the
+ * middle finger (index +max, middle 0, ring -max/2, pinky -max). */
+const KNUCKLE_FAN_FRACTION: Record<NonThumbFinger, number> = {
+  indexFinger: 1,
+  middleFinger: 0,
+  ringFinger: -0.5,
+  pinky: -1,
+}
+const KNUCKLE_FAN_DEG = 10
+/** The thumb splays far more aggressively away from the finger row than any finger-to-finger gap --
+ * same sign as `indexFinger`'s own `KNUCKLE_FAN_FRACTION` (both +1 in the base, unmirrored convention)
+ * so the thumb lands on the index side, not the pinky side -- getting this wrong isn't just a cosmetic
+ * mirroring bug, it's an anatomically impossible hand (thumb and pinky on the same side). A fixed,
+ * clearly-thumb-shaped placeholder angle, not a fitted or cited one. */
+const THUMB_SPLAY_DEG = 45
 
 /** A hand skeleton built purely from `HandPriorState`, with no per-user calibration behind it -- for
  * use before any real scan exists (e.g. an evaluation page loaded with only the population prior). A
@@ -118,12 +150,38 @@ function degreesFor(finger: Finger): (0 | 1 | 2 | 3)[] {
  *
  * Each joint's own local axis orientation (`V`/`Vinv`) is a real per-user calibration fact this
  * project only ever gets from fitting actual captured motion (`fitNorms`/`averageNorms`) -- there's no
- * literature source or population prior for it, and `HandPriorState` doesn't model it. This builds
- * every joint's frame as the identity: a plain, honest placeholder, not a real anatomical estimate. It
- * does mean this fallback skeleton's *raw* per-frame angles won't line up with a real calibrated
- * skeleton's -- consistent internally, but not a substitute for one. */
-export function buildDefaultSkeleton(prior: HandPriorState): Joints {
-  return Object.fromEntries(
+ * literature source or population prior for it, and `HandPriorState` doesn't model it. Every joint
+ * past joint 0 is still built as the identity for exactly that reason: a plain, honest placeholder,
+ * not a real anatomical estimate, for a fact this project genuinely doesn't have yet.
+ *
+ * Joint 0 is the one exception, and deliberately so: `V`/`Vinv` identity there doesn't just mean "no
+ * per-user calibration" the way it does elsewhere -- it makes every finger's knuckle-row landmark (5,
+ * 9, 13, 17) sit exactly collinear along the same ray from the wrist, *regardless of pose*, since
+ * joint 0 (index/middle/thumb's rigid metacarpal, `degree: 0`) has no driven rotation at all, and
+ * ring/pinky's own joint 0 (`degree: 1`) drives only flexion, never ab/ad. No live tracked pose can
+ * un-collapse that -- only a non-identity joint-0 *frame* can -- so identity there isn't a neutral
+ * placeholder the way it is for every other joint; it's a structurally degenerate one that made every
+ * corrected view built on this skeleton (multi-view's 8 side tiles, its center overlay) read as an
+ * implausible, tearing-apart hand regardless of how good the rest of the model was (confirmed live,
+ * 2026-09-06 -- see docs/thumbs/mv1.png). `KNUCKLE_FAN_DEG`/`THUMB_SPLAY_DEG` (module-level, shared
+ * with `buildRestExtensionSkeleton`) fix that with the same eyeballed, uncited fan every real scan
+ * will eventually replace with a fitted one -- an approximation chosen so downstream views are
+ * legible, not a claim this project has measured anyone's actual knuckle spacing.
+ *
+ * `handedness` DOES matter here, despite `hand.limbs` already being run through `makeHand`'s own
+ * chirality-reversal correction (`makeBasis`'s `reverse` parameter in `$lib/hand.ts`) -- an earlier
+ * version of this doc comment assumed that correction made one fixed splay convention agree with real
+ * tracked data for both real-world hands, and reasoned this parameter away entirely. Wrong: confirmed
+ * directly against a live capture, 2026-09-06 -- with no `handedness` parameter (the fixed convention
+ * below, unmirrored), a real Right hand's corrected model put the thumb on the pinky side while a real
+ * Left hand fit correctly. `handedness: 'Left'` is exactly that pre-existing fixed convention
+ * (`mirror = 1`); `'Right'` negates it. Defaults to `'Left'` so callers that only care about
+ * self-consistent round-tripping (most of this file's own tests) don't need updating -- any caller
+ * solving a real tracked frame must pass the frame's own real `handedness` explicitly. */
+export function buildDefaultSkeleton(prior: HandPriorState, handedness: 'Left' | 'Right' = 'Left'): Joints {
+  const nonThumb = FINGERS.filter((f): f is NonThumbFinger => f !== 'thumb')
+  const mirror = handedness === 'Left' ? 1 : -1
+  const skeleton = Object.fromEntries(
     FINGERS.map(finger => {
       const degrees = degreesFor(finger)
       const bones = prior.boneLengths.fingers[finger]
@@ -134,16 +192,135 @@ export function buildDefaultSkeleton(prior: HandPriorState): Joints {
         const Vinv = new Matrix4()
         if (degree === 0) return { length, degree: 0, position: new Vector3(1, 0, 0), V, Vinv }
         if (degree === 3) {
-          const [aCoeff, bCoeff] = prior.cmcMobility.thumb.conjunctCoupling.mean
           // r2 isn't part of this project's prior model (see handModel.ts) -- 0 here just satisfies
           // the existing `ConjunctCoupling` type, it isn't a real fit-quality claim.
-          return { length, degree, V, Vinv, conjunctCoupling: { aCoeff, bCoeff, r2: 0 } }
+          if (finger === 'thumb') {
+            const [aCoeff, bCoeff] = prior.cmcMobility.thumb.conjunctCoupling.mean
+            return { length, degree, V, Vinv, conjunctCoupling: { aCoeff, bCoeff, r2: 0 } }
+          }
+          // The MCP's documented twist depends only on flexion phase (goals.md), never on ab/ad --
+          // unlike the thumb CMC's conjunct rotation, which genuinely depends on both driven axes. A
+          // hardcoded bCoeff of 0 is that documented asymmetry, not a missing term.
+          const aCoeff = prior.mcpAxes[finger as NonThumbFinger].axialRotationWeight.mean
+          return { length, degree, V, Vinv, conjunctCoupling: { aCoeff, bCoeff: 0, r2: 0 } }
         }
         return { length, degree, V, Vinv }
       })
       return [finger, joints]
     }),
   ) as Joints
+  for (const f of nonThumb) {
+    const splay = new Matrix4().makeRotationY(KNUCKLE_FAN_FRACTION[f] * mirror * KNUCKLE_FAN_DEG * DEG2RAD)
+    skeleton[f][0].Vinv.copy(splay)
+    skeleton[f][0].V.copy(splay).invert()
+  }
+  const thumbSplay = new Matrix4().makeRotationY(THUMB_SPLAY_DEG * mirror * DEG2RAD)
+  skeleton.thumb[0].Vinv.copy(thumbSplay)
+  skeleton.thumb[0].V.copy(thumbSplay).invert()
+  return skeleton
+}
+
+/** A mirrored variant of `buildDefaultSkeleton`, for `buildRestExtensionPose`'s static diagnostic
+ * render only -- never used by the solver or any live-tracking path. `buildDefaultSkeleton` now
+ * carries a real knuckle/thumb splay (see its own doc comment), but only one fixed chirality's worth,
+ * since it only ever interprets already-chirality-normalized `hand.limbs`. This function's whole job
+ * is the one thing a single convention can't provide on its own: multi-view's static tile synthesizes
+ * a hand from nothing (no tracked data to normalize), so it has to pick which real-world hand -- Left
+ * or Right -- that synthetic shape represents, and `handedness` mirrors the splay (fan fractions and
+ * thumb angle negated together, about the Y axis) to do that -- a real left hand *is* a real right
+ * hand's mirror image, so this is the correct way to get the other hand's shape from the same
+ * convention, not two independently-tuned constants.
+ *
+ * This function's own `mirror` sign is calibrated separately from, and is NOT required to agree with,
+ * `buildDefaultSkeleton`'s own `handedness` parameter -- they solve different problems (this one:
+ * "which synthetic hand should a `handedness` dropdown show, matching the mirrored video's convention,
+ * confirmed 2026-09-06 below"; that one: "which sign makes a REAL tracked Left/Right hand's corrected
+ * model come out right," confirmed separately and oppositely-signed, 2026-09-06, in its own doc
+ * comment). Don't assume the two `mirror` formulas share a sign just because they share
+ * `KNUCKLE_FAN_FRACTION`/`KNUCKLE_FAN_DEG`/`THUMB_SPLAY_DEG` -- they only share the fan's *shape* and
+ * *magnitude*, calibrated once; each still picks its own sign against its own real-world check. */
+export function buildRestExtensionSkeleton(prior: HandPriorState, handedness: 'Left' | 'Right'): Joints {
+  const skeleton = buildDefaultSkeleton(prior)
+  const nonThumb = FINGERS.filter((f): f is NonThumbFinger => f !== 'thumb')
+  // The video feed is mirrored (selfie-style), so "matches the video" is the spec, not plain anatomy:
+  // a real right hand shown mirrored reads with the thumb on the LEFT of the display, and a real left
+  // hand's thumb reads on the RIGHT -- confirmed directly against the live center-tile video overlay,
+  // 2026-09-06 (an earlier version of this had the two swapped).
+  const mirror = handedness === 'Right' ? 1 : -1
+  for (const f of nonThumb) {
+    const splay = new Matrix4().makeRotationY(KNUCKLE_FAN_FRACTION[f] * mirror * KNUCKLE_FAN_DEG * DEG2RAD)
+    skeleton[f][0].Vinv.copy(splay)
+    skeleton[f][0].V.copy(splay).invert()
+  }
+  const thumbSplay = new Matrix4().makeRotationY(THUMB_SPLAY_DEG * mirror * DEG2RAD)
+  skeleton.thumb[0].Vinv.copy(thumbSplay)
+  skeleton.thumb[0].V.copy(thumbSplay).invert()
+  return skeleton
+}
+
+/** A synthetic, never-tracked pose for diagnostic display only (multi-view's static "model rest"
+ * tile) -- every flexion DOF pinned to its own ROM prior's `minDeg`, the modeled "most extended" end
+ * of that joint's range. For PIP/DIP/thumb-CMC/ring-pinky-CMC this really does mean straight/uncupped;
+ * MCP's rough placeholder ROM's own `minDeg` of -20 is a few degrees of hyperextension, an artifact of
+ * that placeholder data, not a claim about real anatomy. Together this approximates a hand pressed
+ * flat against a hard surface in maximum plausible extension, per `goals.md`'s own ROM bounds -- so an
+ * impossible angle here is a real seed-data bug, not a rendering artifact.
+ *
+ * Each non-thumb finger's MCP ab/ad is additionally pinned to a fraction of `abAdRom`'s own max
+ * magnitude, fanned symmetrically around the middle finger (index +max, middle 0, ring -max/2, pinky
+ * -max) purely so the fingers visually spread apart in this static reference instead of overlapping
+ * the single line `buildDefaultSkeleton`'s degenerate identity splay would otherwise collapse them
+ * onto (multi-view's own documented gap -- see its page doc comment). This fan order/magnitude is a
+ * display convention with no anatomical citation behind it, not a captured or literature-sourced
+ * stance -- it exists only to make a `buildDefaultSkeleton` render legible, is never consumed by the
+ * solver, and is never written from real per-user data.
+ *
+ * Thumb's own "MCP"/"IP" hinges (see `romPrior`'s doc comment) have no modeled ROM prior at all --
+ * left at 0 (straight), the same value every other simple hinge's own `minDeg` happens to be here, so
+ * this doesn't invent a number where none exists.
+ *
+ * `handedness` must be the same value passed to `buildRestExtensionSkeleton` -- both mirror their own
+ * half of the fan (fingertip ab/ad here, knuckle-row splay there) by the same `mirror` sign, so the
+ * two stay consistent with each other (fingertips spreading the same direction their own knuckle
+ * splayed, not opposite ways). */
+export function buildRestExtensionPose(prior: HandPriorState, handedness: 'Left' | 'Right'): Pose {
+  const pose = emptyPose()
+  const nonThumb = FINGERS.filter((f): f is NonThumbFinger => f !== 'thumb')
+  // Must match buildRestExtensionSkeleton's own mirror sign -- see that function's comment on why
+  // 'Right' maps to mirror=1 (the video-mirroring convention), not 'Left'.
+  const mirror = handedness === 'Right' ? 1 : -1
+  const abAdFraction: Record<NonThumbFinger, number> = {
+    indexFinger: 1,
+    middleFinger: 0,
+    ringFinger: -0.5,
+    pinky: -1,
+  }
+  for (const f of nonThumb) {
+    const mcp = prior.mcpAxes[f]
+    pose[f][1] = { angleZ: mcp.flexExtRom.minDeg * DEG2RAD, angleY: mcp.abAdRom.maxDeg * abAdFraction[f] * mirror * DEG2RAD }
+    pose[f][2] = { angleZ: prior.pipDipRom.pip[f].minDeg * DEG2RAD, angleY: 0 }
+    pose[f][3] = { angleZ: prior.pipDipRom.dip[f].minDeg * DEG2RAD, angleY: 0 }
+  }
+  pose.ringFinger[0] = { angleZ: prior.cmcMobility.ring.flexionRom.minDeg * DEG2RAD, angleY: 0 }
+  pose.pinky[0] = { angleZ: prior.cmcMobility.pinky.flexionRom.minDeg * DEG2RAD, angleY: 0 }
+  // Segment 1->2's direction is expressed relative to joint 0's own splay frame
+  // (buildRestExtensionSkeleton's THUMB_SPLAY_DEG) -- both are rotations about the same (Y) axis, so
+  // they simply add: the segment's total angle off the reach axis is
+  // THUMB_SPLAY_DEG + THUMB_MCP_BEND_DEG, not just the second term on its own. Tying this to a
+  // fraction of abAdRom.maxDeg (two earlier attempts) was never well-justified -- abAdRom is a real
+  // anatomical ROM limit, this is a separate, purely cosmetic "what looks like a natural relaxed
+  // curve" choice for a diagnostic-only static pose, so it's a plain, independent angle instead.
+  // Direction and magnitude both eyeballed against live renders (docs/thumbs/model_rest_2.png,
+  // model_rest_3.png, 2026-09-06): the first two attempts (+17deg, then +6deg, both widening away from
+  // the reach axis) bent landmark 1 the wrong way -- the correct-looking bend narrows back toward the
+  // reach axis instead, hence the negative sign here. Not sourced data -- tune directly if it still
+  // doesn't look right.
+  const THUMB_MCP_BEND_DEG = -10
+  pose.thumb[1] = {
+    angleZ: prior.cmcMobility.thumb.flexExtRom.minDeg * DEG2RAD,
+    angleY: THUMB_MCP_BEND_DEG * mirror * DEG2RAD,
+  }
+  return pose
 }
 
 /** Every free angle in the pose, in a fixed order, derived from which axes `skeleton`'s joints
@@ -195,7 +372,17 @@ function trackedPose(skeleton: Joints, hand: Hand): Pose {
       let angleZ = 0
       let angleY = 0
       if (joint.degree >= 1) angleZ = Math.asin(clampUnit(x.y))
-      if (joint.degree >= 2) angleY = Math.asin(clampUnit(x.z / -Math.cos(angleZ)))
+      // Gimbal-lock-style singularity as angleZ -> +-90deg: cos(angleZ) -> 0, so any nonzero x.z
+      // (even pure floating-point noise) gets divided by a near-zero denominator and blows up into a
+      // spurious large angleY, however tiny the actual off-axis component is -- confirmed directly: a
+      // synthetic 90deg-exact MCP flexion recovered a ~9deg phantom ab/ad that a 89.9deg or 80deg
+      // flexion did not (2026-09-06, surfaced by buildDefaultSkeleton's new joint-0 splay perturbing
+      // x.z away from the exact 0 that masked this before). angleY is genuinely unrecoverable from a
+      // direction vector at this exact singularity regardless -- defaulting to 0 there is the standard
+      // gimbal-lock convention, not a new approximation.
+      const GIMBAL_LOCK_COS_EPSILON = 1e-6
+      const cosZ = Math.cos(angleZ)
+      if (joint.degree >= 2 && Math.abs(cosZ) > GIMBAL_LOCK_COS_EPSILON) angleY = Math.asin(clampUnit(x.z / -cosZ))
       pose[finger][i] = { angleZ, angleY }
 
       // The derived twist doesn't change this joint's own two angles above, only how its frame
@@ -234,11 +421,27 @@ function romPrior(v: PoseVar, prior: HandPriorState): BetaRom | undefined {
 const DATA_NOISE_SD_RAD = 5 * DEG2RAD
 const SOLVE_SWEEPS = 30
 
+/** Which fingers' tracked data this frame is under an excluded capture condition (dorsal orientation,
+ * thumb-lateral angle, self-occlusion) -- `goals.md`'s exclusion rule: "An observation from an excluded
+ * condition never enters the likelihood for that quantity, regardless of how many accumulate." `'all'`
+ * covers a whole-hand condition (dorsal orientation observes every finger equally badly); a `Set`
+ * covers a condition specific to one or more fingers (the thumb-lateral angle only affects the thumb;
+ * self-occlusion is typically one finger hidden behind another). Undefined/empty means nothing this
+ * frame is excluded, the same as every caller before this parameter existed. */
+export type ExcludedFingers = ReadonlySet<Finger> | 'all'
+
+function isFingerExcluded(finger: Finger, excluded: ExcludedFingers | undefined): boolean {
+  return excluded === 'all' || (excluded !== undefined && excluded.has(finger))
+}
+
 /** Given one tracked frame and the current hand-model belief, produce the pose that best balances
  * "matches what the camera actually saw this frame" against "is anatomically plausible" -- see the
  * module doc comment for the overall approach and its two named simplifications (no memory of previous
- * frames; a flat, not-yet-calibrated assumption for how noisy the raw tracking is). */
-export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand): SolveResult {
+ * frames; a flat, not-yet-calibrated assumption for how noisy the raw tracking is). `excluded` names
+ * any finger whose tracked data this frame must be kept out of the objective entirely (see
+ * `ExcludedFingers`) -- an excluded finger still gets a solved pose, pulled only by its own anatomical
+ * prior and whatever it's coupled to, exactly as if this frame had tracked nothing for it at all. */
+export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand, excluded?: ExcludedFingers): SolveResult {
   const layout = poseLayout(skeleton)
   const tracked = poseToVector(trackedPose(skeleton, hand), layout)
   const n = layout.length
@@ -253,7 +456,12 @@ export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand): 
   const totalVars = n + 5
 
   const dataWeight = new Array(totalVars).fill(0)
-  for (let k = 0; k < n; k++) dataWeight[k] = 1 / DATA_NOISE_SD_RAD ** 2
+  for (let k = 0; k < n; k++) {
+    // An excluded finger's tracked reading never enters the objective, however many frames accumulate
+    // -- not merely down-weighted (`goals.md`'s exclusion rule). Zero weight, not a smaller one.
+    if (isFingerExcluded(layout[k].finger, excluded)) continue
+    dataWeight[k] = 1 / DATA_NOISE_SD_RAD ** 2
+  }
   // No tracked value exists for the wrist/forearm/elbow group -- `tracked` only ever gets read for
   // the first `n` (finger) indices below (the residual sum, and this group's own cold-start init).
 
@@ -262,6 +470,9 @@ export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand): 
   const romBounds: (readonly [number, number] | undefined)[] = new Array(totalVars).fill(undefined)
 
   layout.forEach((v, k) => {
+    // MCP ab/ad is choke-coupled to this joint's own (per-sweep, settling) flexion angle -- handled
+    // dynamically inside the sweep loop below instead of as one of these fixed, pose-independent terms.
+    if (v.finger !== 'thumb' && v.joint === 1 && v.axis === 'angleY') return
     const rom = romPrior(v, prior)
     if (!rom) return
     romWeight[k] = 1 / (rom.sdDeg * DEG2RAD) ** 2
@@ -304,12 +515,16 @@ export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand): 
   const flexionIndices = new Map(
     nonThumbFingers.map(f => [f, [1, 2, 3].map(j => indexOf.get(`${f}.${j}.angleZ`))]),
   )
+  const mcpFlexIndex = new Map(nonThumbFingers.map(f => [f, indexOf.get(`${f}.1.angleZ`)]))
+  const mcpAbAdIndex = new Map(nonThumbFingers.map(f => [f, indexOf.get(`${f}.1.angleY`)]))
 
   // Cold start every frame (see module doc comment): finger joints start from what the raw tracked
   // data says; the wrist/forearm/elbow group has no tracked data at all, so it starts at its own
   // current prior mean instead, the same "neutral, prior-consistent value" rule average-hand.md
-  // specifies for any pose variable with nothing observed yet.
-  let vec = [...tracked, romCenter[WRIST_FLEX_EXT], romCenter[WRIST_RADIAL_ULNAR], romCenter[FOREARM_PRON_SUP], romCenter[ELBOW_FLEXION], romCenter[ELBOW_SWIVEL]]
+  // specifies for any pose variable with nothing observed yet. An excluded finger gets that same
+  // treatment -- its tracked reading is exactly as unusable as a group with no tracked reading at all.
+  const coldStartFinger = layout.map((v, k) => (isFingerExcluded(v.finger, excluded) ? romCenter[k] : tracked[k]))
+  let vec = [...coldStartFinger, romCenter[WRIST_FLEX_EXT], romCenter[WRIST_RADIAL_ULNAR], romCenter[FOREARM_PRON_SUP], romCenter[ELBOW_FLEXION], romCenter[ELBOW_SWIVEL]]
 
   for (let sweep = 0; sweep < SOLVE_SWEEPS; sweep++) {
     const weight = fixedWeight.slice()
@@ -333,6 +548,36 @@ export function solvePose(skeleton: Joints, prior: HandPriorState, hand: Hand): 
       const w = 1 / (varianceDeg2 * DEG2RAD ** 2)
       weight[dip] += w
       weightedSum[dip] += w * (predictedDeg * DEG2RAD)
+    }
+
+    // MCP ab/ad range chokes down toward straight as flexion increases -- "widest near extension,
+    // mechanically choked as the joint flexes toward it, per collateral-ligament tightening"
+    // (goals.md). `abAdChokeCoeff` is degrees of ab/ad half-range lost per degree of flexion;
+    // recomputed every sweep since it reads the joint's own current (settling) flexion angle. A floor
+    // keeps the effective range -- and its weight -- well-defined even for a fully-flexed joint or an
+    // aggressive coefficient; this is a floor, not an anatomical claim that a joint always keeps that
+    // much play. The choked bound is also written into `romBounds` for the final hard-clamp step below,
+    // so a converged, heavily-flexed joint can't be clamped back out to the joint's *unchoked* range.
+    const MIN_AB_AD_HALF_RANGE_DEG = 1
+    for (const f of nonThumbFingers) {
+      const abAd = mcpAbAdIndex.get(f)
+      const flex = mcpFlexIndex.get(f)
+      if (abAd === undefined || flex === undefined) continue
+      const base = prior.mcpAxes[f].abAdRom
+      const halfRangeDeg = (base.maxDeg - base.minDeg) / 2
+      if (halfRangeDeg <= 0) continue
+      const flexDeg = Math.max(vec[flex] * RAD2DEG, 0)
+      const chokeCoeff = prior.mcpAxes[f].abAdChokeCoeff.mean
+      const effectiveHalfRangeDeg = Math.max(halfRangeDeg - chokeCoeff * flexDeg, MIN_AB_AD_HALF_RANGE_DEG)
+      const scale = effectiveHalfRangeDeg / halfRangeDeg
+      const effectiveSdDeg = Math.max(base.sdDeg * scale, MIN_AB_AD_HALF_RANGE_DEG / 2)
+      const w = 1 / (effectiveSdDeg * DEG2RAD) ** 2
+      weight[abAd] += w
+      weightedSum[abAd] += w * (base.meanDeg * DEG2RAD)
+      romBounds[abAd] = [
+        (base.meanDeg - effectiveHalfRangeDeg) * DEG2RAD,
+        (base.meanDeg + effectiveHalfRangeDeg) * DEG2RAD,
+      ]
     }
 
     // Flexing one finger tends to drag its neighbors along -- applied to each finger's outermost

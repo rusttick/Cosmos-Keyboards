@@ -95,20 +95,35 @@
 
 Stage 3 is marked done above because it runs and is tested, but re-reading `goals.md` against what
 `ikSolve.ts` actually does turned up three real, unimplemented requirements — none silently hidden in
-code comments the way Group G's other two cross-terms were, so calling them out explicitly here:
+code comments the way Group G's other two cross-terms were, so calling them out explicitly here. All
+three closed 2026-09-06:
 
-- [ ] MCP's ab/ad range is supposed to mechanically choke as flexion increases (`goals.md`: "widest near
+- [x] MCP's ab/ad range is supposed to mechanically choke as flexion increases (`goals.md`: "widest near
       extension, mechanically choked as the joint flexes toward it, per collateral-ligament
       tightening"). `mcpAxes[finger].abAdChokeCoeff` exists in `HandPriorState` and is seed-tested, but
-      `ikSolve.ts` never reads it — flexZ and abAdY are solved as independent ROM priors with no
+      `ikSolve.ts` never read it — flexZ and abAdY were solved as independent ROM priors with no
       coupling between them at all.
-- [ ] MCP's "low-weight third axial term" (`goals.md`: "a smaller flexion-phase-dependent axial rotation
+      Fixed: `solvePose` now recomputes the ab/ad joint's effective half-range/sd every sweep from the
+      joint's own current flexion angle and `abAdChokeCoeff`, with a floor so it never collapses to
+      zero, and feeds the same choked bound into the final hard clamp. `abAdChokeCoeff`'s seed value is
+      still 0 (no numeric source found — see the Group A/handModelData.ts notes above), so this has no
+      effect on any real prior yet; it's tested with a synthetic nonzero coefficient.
+- [x] MCP's "low-weight third axial term" (`goals.md`: "a smaller flexion-phase-dependent axial rotation
       ... never a single pooled axis") has no representation in `$lib/hand.ts`'s FK chain at all. Every
       non-thumb MCP is `degree: 2` (two axes, no third); only `degree: 3` (thumb CMC) carries a derived
       third rotation, via `conjunctCoupling`. Giving MCP the same mechanism (or an equivalent) is a
       `$lib/hand.ts` FK-chain change of the same shape as the ring/pinky CMC fix already done — not
       started.
-- [ ] The exclusion rule (`goals.md`: "An observation from an excluded condition (dorsal, thumb-lateral,
+      Partially fixed: `$lib/hand.ts`'s `fkBy`/`fromLimbs` already handle `degree: 3` generically (not
+      thumb-specific), so no FK-chain change was actually needed there. `ikSolve.ts`'s own
+      `degreesFor`/`buildDefaultSkeleton` now give every non-thumb MCP `degree: 3`, with
+      `conjunctCoupling.aCoeff` read from `mcpAxes[finger].axialRotationWeight` and `bCoeff` hardcoded 0
+      (goals.md documents the twist as flexion-phase-dependent only, never ab/ad-coupled). This only
+      takes effect for `buildDefaultSkeleton`'s population-prior fallback skeleton — real scans still
+      produce `degree: 2` MCP joints via `calculateJoints`/`fitNorms`, which has no path to _fit_ a
+      `conjunctCoupling` for MCP the way `thumbCmc.ts` does for the CMC. That per-user fitting is a
+      separate, larger task, not started.
+- [x] The exclusion rule (`goals.md`: "An observation from an excluded condition (dorsal, thumb-lateral,
       self-occluded) never enters the likelihood for that quantity, regardless of how many accumulate")
       has no representation in `ikSolve.ts` at all — every frame's data term uses whatever `trackedPose`
       recovers, unconditionally, with no notion of "this frame/orientation is excluded." `update.ts`
@@ -116,6 +131,12 @@ code comments the way Group G's other two cross-terms were, so calling them out 
       the per-frame solve. `average-hand.md`'s own `ikSolve.test.ts` spec names this exact behavior ("a
       synthetic excluded-condition observation is confirmed to never enter the objective, not merely
       down-weighted") — untested and unimplemented here.
+      Fixed: `solvePose` takes an optional `excluded: ExcludedFingers` (`'all'` or a `Set<Finger>`) —
+      an excluded finger's data-term weight is forced to 0 (not merely reduced) and its cold-start value
+      comes from the prior mean instead of the tracked reading, exactly as if nothing had been tracked
+      for it that frame. No caller wires this to a real dorsal/thumb-lateral/self-occlusion detector
+      yet — that detection logic doesn't exist anywhere in this project yet either, so there's nothing
+      to call it from until `/scan3`'s capture pipeline (or a live-view orientation guard) exists.
 
 Smaller, lower-priority note from the same pass:
 

@@ -202,6 +202,60 @@ export function drawAxisTriadOverlay(
   }
 }
 
+/** Projects a model-reconstructed landmark set (e.g. `poseToLandmarkVectors`'s output) into the same
+ * normalized [0,1] image-space `hand.hand.keypoints` already lives in, so the two can be drawn with
+ * the exact same `drawHandOverlay`/`drawAxisTriadOverlay` calls on the same canvas, on top of the real
+ * video -- the "does the corrected model actually look like the real tracked hand" comparison
+ * multi-view's center tile exists for.
+ *
+ * There's no real camera projection anywhere in this codebase to invert (`hand.vectors`/`hand.limbs`
+ * are a metric 3D reconstruction from MediaPipe's own *world* landmarks, never registered to screen
+ * pixels), so this is an orthographic approximation, not a true reprojection:
+ *
+ * 1. Undo the `hand.basis` rotation the model's own per-joint angles were solved against (`hand.limbs`
+ *    is `hand.basis`-rotated; `correctedVectors`'s shape is fit to match that rotated frame -- see
+ *    `ikSolve.ts`'s `trackedPose` doc comment), turning `correctedVectors` back into the same
+ *    raw-camera-relative orientation `hand.vectors` is already in.
+ * 2. Scale by the ratio between one real tracked bone's on-screen pixel length and *that same bone's
+ *    length in `correctedVectors`'s own units* (wrist -> middle MCP, the same roughly pose-invariant
+ *    reference multi-view's own tile scale already uses) -- deliberately NOT `hand.vectors`' own 3D
+ *    length. `correctedVectors` comes from `SolvedHand.worldPositions()`, whose length unit is
+ *    whatever its own `scale` argument says (an internal CAD-scale convention, currently a bare
+ *    `poseToLandmarkVectors()` call defaulting to `scale=100`) and has no fixed relationship to
+ *    `hand.vectors`' units (MediaPipe *world* landmarks, in meters) at all -- mixing the two here once
+ *    sent every landmark flying off-screen along a single degenerate line (confirmed against a live
+ *    capture, not merely reasoned about), since the corrected/raw unit ratio is roughly 100,000x, not
+ *    1x. Normalizing against `correctedVectors`' own reference bone is what makes this correct
+ *    regardless of whatever absolute unit `worldPositions()` happens to use.
+ * 3. Anchor at the real tracked wrist's own screen position, so the corrected hand overlays the real
+ *    one at the real one's actual on-screen location rather than floating at a fixed spot.
+ *
+ * Accurate for a hand roughly parallel to the camera's image plane; a hand angled sharply toward or
+ * away from the camera will show more visible drift, since this ignores perspective foreshortening
+ * entirely -- an approximation for visual comparison, not a claim of pixel-exact registration. */
+export function projectCorrectedOntoKeypoints(
+  hand: Hand,
+  correctedVectors: Vector3[],
+  canvasWidth: number,
+  canvasHeight: number,
+): { x: number; y: number }[] {
+  const rawWristPx = { x: hand.hand.keypoints[0].x * canvasWidth, y: hand.hand.keypoints[0].y * canvasHeight }
+  const rawRefPx = { x: hand.hand.keypoints[9].x * canvasWidth, y: hand.hand.keypoints[9].y * canvasHeight }
+  const rawPxDist = Math.hypot(rawRefPx.x - rawWristPx.x, rawRefPx.y - rawWristPx.y)
+  const wristCorrected = correctedVectors[0]
+  const correctedRefDist = correctedVectors[9].distanceTo(wristCorrected) || 1
+  const pxPerUnit = rawPxDist / correctedRefDist
+
+  const toCameraSpace = hand.basis.clone().invert()
+
+  return correctedVectors.map(v => {
+    const rel = v.clone().sub(wristCorrected).applyMatrix4(toCameraSpace)
+    const px = rawWristPx.x + rel.x * pxPerUnit
+    const py = rawWristPx.y - rel.y * pxPerUnit // screen y grows downward; hand.vectors/rel are y-up
+    return { x: px / canvasWidth, y: py / canvasHeight }
+  })
+}
+
 /** Diagnostic for a suspected coordinate-frame mismatch: draws the palm-plane triangle (landmarks 0,
  * 5, 17) reconstructed purely from `hand.vectors`'s x/y -- the exact input handPlaneNormal() (and so
  * the arrow drawn by drawPalmNormalOverlay) is computed from -- in a small inset box, independent of and
@@ -469,6 +523,15 @@ export function drawSkeletonView(
      * merely sitting near an unconverged, wide prior. `undefined` for a landmark draws it at full
      * opacity, same as when this option is omitted entirely. */
     landmarkOpacity?: (number | undefined)[]
+    /** Where landmark 0 (the wrist -- this function's projection origin) lands on screen. Defaults to
+     * dead center, which is wrong for a view where the hand only ever extends away from the wrist in
+     * one screen direction (e.g. a Top/Bottom view looking straight down the palm normal, where every
+     * finger projects toward one side and the other half of the canvas around a centered wrist goes
+     * unused) -- centering the origin there wastes half the canvas and clips fingers against the edge
+     * they extend toward. Callers of such a view should push this toward the far edge instead (see
+     * multi-view's Top/Bottom tiles). Passed through to `drawAxisTriad` too when a caller layers that
+     * on top, so the two stay visually anchored to the same point. */
+    origin?: { x: number; y: number }
   } = {},
 ): void {
   const ctx = canvas.getContext('2d')
@@ -478,8 +541,8 @@ export function drawSkeletonView(
   if (!hand) return
 
   const wrist = hand.vectors[0]
-  const cx = canvas.width / 2
-  const cy = canvas.height / 2
+  const cx = options.origin?.x ?? canvas.width / 2
+  const cy = options.origin?.y ?? canvas.height / 2
   const toScreen = (p: Vector3) => {
     const rel = new Vector3().subVectors(p, wrist)
     // Screen y grows downward; hand.vectors is y-up (see makeHand's `-a.y`) -- same flip every other
@@ -561,13 +624,15 @@ export function drawAxisTriad(
   hand: Pick<Hand, 'vectors'> | undefined,
   axes: { normal: Vector3; up: Vector3; left: Vector3 },
   basis: { right: Vector3; up: Vector3 },
+  /** Where the wrist (drawSkeletonView's projection origin) landed on screen -- must match whatever
+   * `origin` was passed to the `drawSkeletonView` call this layers on top of, or the triad renders
+   * rooted at the wrong point. Defaults to canvas center, matching drawSkeletonView's own default. */
+  origin?: { x: number; y: number },
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx || !hand) return
 
-  // The wrist is drawSkeletonView's projection origin (rel = p - wrist), so it always projects to
-  // exactly canvas center -- reuse that rather than recomputing a `rel` of zero.
-  const w = { x: canvas.width / 2, y: canvas.height / 2 }
+  const w = origin ?? { x: canvas.width / 2, y: canvas.height / 2 }
   const len = Math.min(canvas.width, canvas.height) * 0.35
   const dotThreshold = len * 0.08
 
