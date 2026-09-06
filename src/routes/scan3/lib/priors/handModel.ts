@@ -24,6 +24,10 @@ export interface ScalarPrior {
   mean: number
   variance: number
   source: string
+  /** How many deliberate observations (not counting the literature seed itself) have gone into this
+   * belief so far -- `update.ts` increments it. Optional and absent on every seed value in
+   * `handModelData.ts`, since none of those come from an observation. */
+  evidenceCount?: number
 }
 
 /** A belief about several numbers that move together -- a mean for each, plus their full covariance
@@ -34,6 +38,8 @@ export interface VectorPrior {
   mean: number[]
   covariance: number[][]
   source: string
+  /** Same meaning as `ScalarPrior.evidenceCount`. */
+  evidenceCount?: number
 }
 
 /** A belief about a joint angle that has a hard anatomical limit -- a joint can't bend past its

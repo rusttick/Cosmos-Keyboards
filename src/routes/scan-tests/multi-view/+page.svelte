@@ -12,6 +12,13 @@
   import { DEFAULT_ONE_EURO_OPTIONS } from '../lib/landmarkFilter'
   import { palmBasisAxes } from '$lib/hand'
   import { Vector3 } from 'three'
+  import {
+    buildDefaultSkeleton,
+    poseConfidenceSdDeg,
+    poseToLandmarkVectors,
+    solvePose,
+  } from '../../scan3/lib/priors/ikSolve'
+  import { HAND_PRIOR_SEED } from '../../scan3/lib/priors/handModelData'
 
   // The center tile is the real video + overlay (like thumb-cmc's normal arrow); the 8 side tiles are
   // pure reconstructed-skeleton views, no video, so a monocular depth-estimation error that's
@@ -31,6 +38,29 @@
   // externally-referenced pair) -- see tileViewBases's doc comment for why that's what keeps all 3
   // drawn axes fixed in every view, not just the normal.
   const STALL_RESET_SECONDS = 3
+
+  // average-hand.md Stage 6: this page never writes to HandPriorState, so it's loaded once here as a
+  // fixed snapshot for the whole session -- "initially just the literature seed," per the spec, since
+  // there's no capture-session pipeline yet to load a per-user posterior from instead. `skeleton` has
+  // no per-user calibration behind it either (see buildDefaultSkeleton's own doc comment) -- this page
+  // is meant for watching how the *model* constrains a frame, not for judging a specific hand's fit.
+  const priorSnapshot = HAND_PRIOR_SEED
+  const skeleton = buildDefaultSkeleton(priorSnapshot)
+  // Confidence doesn't change frame to frame (this page never updates the prior), so it's computed
+  // once rather than recomputed every frame alongside the pose itself.
+  const confidenceSdDeg = poseConfidenceSdDeg(skeleton, priorSnapshot)
+  // Same opacity mapping for every landmark: more confident (lower sdDeg) draws more solid, an
+  // unmodeled joint (undefined) draws at a fixed dim opacity distinct from both ends, so it reads as
+  // "no belief here" rather than "very confident" or "very uncertain." 60deg is this page's own
+  // chosen reference scale, not a cited threshold -- live-tune like every other display constant in
+  // this project's test pages if it doesn't read clearly against real capture.
+  const MAX_SD_DEG_FOR_OPACITY = 60
+  const UNMODELED_OPACITY = 0.25
+  function opacityFromSdDeg(sdDeg: number | undefined): number {
+    if (sdDeg === undefined) return UNMODELED_OPACITY
+    return Math.max(0.15, 1 - sdDeg / MAX_SD_DEG_FOR_OPACITY)
+  }
+  const landmarkOpacity = confidenceSdDeg.map(opacityFromSdDeg)
 
   let video: HTMLVideoElement
   let centerCanvas: HTMLCanvasElement
@@ -61,6 +91,7 @@
   const displayRefreshIntervalSeconds = 1 / DEFAULT_ONE_EURO_OPTIONS.minCutoff
   let lastDisplayUpdate = 0
   let currentScore: number | undefined
+  let currentResidual: number | undefined
 
   $: noHandDetected = running && (lastFrameAt === undefined ? elapsed > 1 : elapsed - lastFrameAt > 1)
 
@@ -142,6 +173,7 @@
     lastFrameAt = undefined
     lastDisplayUpdate = 0
     currentScore = undefined
+    currentResidual = undefined
     staleResetAttempted = false
     try {
       detector?.dispose()
@@ -188,38 +220,54 @@
         staleResetAttempted = false
 
         drawHandOverlay(centerCanvas, hand.hand.keypoints)
+        // The center tile stays a live view of the *raw* tracked hand -- it's the ground-truth
+        // reference the 8 corrected tiles are checked against, not the "final answer" the model
+        // produces (see below). Its own axis triad is computed from raw data on purpose, unchanged.
         // The 3 raw makeBasis() vectors (not hand.basis's own relabeled/permuted output -- see
         // palmBasisAxes's doc comment in $lib/hand.ts). Single source of truth for all 3 axes on
         // every tile below, center included, instead of the center tile computing its normal via a
         // separately-maintained formula (orientation.ts's handPlaneNormal(), which happens to compute
         // the same vector today, but duplicated formulas are exactly what caused the two-conventions
         // bug documented in test_results.md's 2026-09-02 entry).
-        const axes = palmBasisAxes(hand.vectors, hand.handedness)
-        drawAxisTriadOverlay(centerCanvas, hand.hand.keypoints, axes)
+        const rawAxes = palmBasisAxes(hand.vectors, hand.handedness)
+        drawAxisTriadOverlay(centerCanvas, hand.hand.keypoints, rawAxes)
+
+        // average-hand.md Stage 6: what the 8 side tiles render is always this model-constrained
+        // solve against `priorSnapshot`, never the raw tracked frame directly -- the whole point of
+        // this page is watching whether the model keeps a corrupted or occluded frame from visibly
+        // distorting the displayed hand, which isn't visible if the raw reading is what's drawn.
+        const solved = solvePose(skeleton, priorSnapshot, hand)
+        const correctedVectors = poseToLandmarkVectors(skeleton, solved.pose)
+        const axes = palmBasisAxes(correctedVectors, hand.handedness)
 
         if (elapsed - lastDisplayUpdate >= displayRefreshIntervalSeconds) {
           lastDisplayUpdate = elapsed
           currentScore = hand.score
+          currentResidual = solved.residual
         }
 
         // Roughly pose-invariant reference length (wrist -> middle MCP, a rigid palm-level span) so
         // the rendered hand stays a stable size across frames instead of auto-fitting -- and so
         // jarringly resizing -- every tile every frame.
-        const refLen = hand.vectors[0].distanceTo(hand.vectors[9]) || 1
+        const refLen = correctedVectors[0].distanceTo(correctedVectors[9]) || 1
         const tileSize = Math.min(tile0?.width || 0, tile0?.height || 0) || 200
         const scale = (tileSize * 0.4) / refLen
 
         // drawSkeletonView draws just the skeleton here (no normal arrow of its own -- `normal` is
         // omitted) since drawAxisTriad draws all 3 axes, including the normal, uniformly across every
-        // tile right after it.
+        // tile right after it. `landmarkOpacity` is Stage 6's confidence-visibility requirement: a
+        // joint sitting near its own converged, tight prior renders solid; one near a wide,
+        // unconverged prior renders faint -- so a corrupted frame's pose staying bounded doesn't read
+        // the same whether that was a confident correction or a coincidence.
+        const correctedHand = { vectors: correctedVectors }
         const bases = tileViewBases(axes)
         bases.forEach((cam, i) => {
           const canvas = tileCanvases[i]
           if (!canvas) return
           const view = VIEWS[i]
           const label = view.number !== undefined ? `${view.number} ${view.name}` : view.name
-          drawSkeletonView(canvas, hand, undefined, cam, scale, { label })
-          drawAxisTriad(canvas, hand, axes, cam)
+          drawSkeletonView(canvas, correctedHand, undefined, cam, scale, { label, landmarkOpacity })
+          drawAxisTriad(canvas, correctedHand, axes, cam)
         })
       })
       .catch((e) => console.error(e))
@@ -245,16 +293,20 @@
       The video-overlay skeleton looks smooth and plausible, but a monocular reconstruction error
       (especially in depth, MediaPipe's weakest axis) can be invisible from the same angle the camera
       measures along and obvious from any other. The center tile is the real video + overlay, exactly
-      like the other capture pages. The 8 surrounding tiles render the same reconstructed 3D skeleton (<code
-        >hand.vectors</code
-      >) from FreeCAD's Standard Views (View &gt; Standard views, keyboard shortcuts 0/1-6) -- Isometric,
-      Front, Top, Right, Rear, Bottom, Left, plus Dimetric to fill the grid -- built around the live
-      palm-plane normal playing the role of that reference frame's local up (Z) axis. The whole set of
-      views rotates together with the hand (locked to the live normal) rather than staying fixed relative
-      to the real camera. Every tile also draws the hand's full orientation frame as a color-coded arrow
-      triad (cyan = palm-plane normal, amber = the 0→5 axis, pink = their cross product), rooted at the
-      wrist -- watch whether it stays rigidly attached to the visible hand motion (a stable orientation
-      frame) or visibly twists on its own (the frame itself drifting).
+      like the other capture pages -- the raw reference to compare against. The 8 surrounding tiles
+      render this project's hand-prior-model-corrected reconstruction (<code>ikSolve.ts</code>'s solve
+      against a fixed, literature-seeded <code>HandPriorState</code>), never the raw tracked frame
+      directly, from FreeCAD's Standard Views (View &gt; Standard views, keyboard shortcuts 0/1-6) --
+      Isometric, Front, Top, Right, Rear, Bottom, Left, plus Dimetric to fill the grid -- built around
+      the live palm-plane normal playing the role of that reference frame's local up (Z) axis. The whole
+      set of views rotates together with the hand (locked to the live normal) rather than staying fixed
+      relative to the real camera. Every tile also draws the hand's full orientation frame as a
+      color-coded arrow triad (cyan = palm-plane normal, amber = the 0→5 axis, pink = their cross
+      product), rooted at the wrist -- watch whether it stays rigidly attached to the visible hand motion
+      (a stable orientation frame) or visibly twists on its own (the frame itself drifting), and whether
+      a corrupted or occluded frame fails to visibly distort the corrected hand the way it would the raw
+      one. Each landmark's dot opacity reflects the model's current confidence in it -- this page never
+      updates that belief, so watch the pose, not the opacity, change frame to frame.
     </p>
 
     {#if error}
@@ -334,10 +386,21 @@
       <p class:text-amber-400={noHandDetected}>
         Current confidence: {currentScore !== undefined ? currentScore.toFixed(3) : '—'}
       </p>
+      <p>
+        Model correction residual: {currentResidual !== undefined ? currentResidual.toFixed(2) : '—'}
+      </p>
       <p class="text-xs text-gray-400">
         Numeric display refreshes at ~{DEFAULT_ONE_EURO_OPTIONS.minCutoff.toFixed(2)} Hz -- tied to the One
         Euro min cutoff (this page has no tuning UI; see flexion-sweep for that). The 8 side tiles redraw
-        every frame regardless -- they're visual renders, not numeric readouts.
+        every frame regardless -- they're visual renders, not numeric readouts. What they render is always
+        the solve against the literature-seed `HandPriorState` below, corrected from this frame's raw tracking
+        -- never the raw reading itself (the center tile is the raw reference to compare against). Each joint's
+        dot opacity reflects how confident that belief currently is (solid = converged/tight, faint = still
+        wide, dimmest = no belief modeled for that joint at all yet) -- this page never narrows those beliefs
+        itself, so opacity stays fixed for the whole session, only the pose moves. "Residual" is how far the
+        corrected pose still sits from the raw tracked frame -- near zero means the prior barely had to correct
+        anything; large means either this frame's tracking looks bad, or the literature prior doesn't fit
+        this particular hand well.
       </p>
       {#if noHandDetected}
         <p class="text-amber-400 font-semibold">

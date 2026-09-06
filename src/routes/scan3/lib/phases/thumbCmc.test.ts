@@ -1,7 +1,7 @@
 import type { Hand, Joint } from '$lib/hand'
 import { describe, expect, test } from 'bun:test'
 import { Matrix4, Vector3 } from 'three'
-import { fitConjunctCoupling, fitThumbCmcAxis, OcclusionGuardedGrowthPlateau, OcclusionGuardedPlateau, thumbMcpIpAngles } from './thumbCmc'
+import { assembleThumbCmcJoint, fitConjunctCoupling, fitThumbCmcAxis, OcclusionGuardedGrowthPlateau, OcclusionGuardedPlateau, thumbMcpIpAngles } from './thumbCmc'
 
 const IDENTITY_JOINT: Joint = { length: 1, degree: 1, V: new Matrix4(), Vinv: new Matrix4() }
 
@@ -217,5 +217,26 @@ describe('OcclusionGuardedGrowthPlateau', () => {
       t += 0.3
     }
     expect(guard.status()).toBe('converged')
+  })
+})
+
+describe('assembleThumbCmcJoint', () => {
+  test('combines a fitted axis and conjunct coupling into a degree: 3 joint', () => {
+    const history = [-0.1, 0, 0.1].map(t => syntheticThumbHand(t, 0, 0, new Vector3(0, 0, 1)))
+    const axisJoint = fitThumbCmcAxis(history, 1, new Matrix4())
+    const coupling = { aCoeff: 0.3, bCoeff: -0.1, r2: 0.9 }
+    const joint = assembleThumbCmcJoint(axisJoint, coupling)
+
+    expect(joint.degree).toBe(3)
+    if (joint.degree === 3) {
+      expect(joint.conjunctCoupling).toEqual(coupling)
+      expect(joint.V).toBe(axisJoint.V)
+      expect(joint.length).toBe(axisJoint.length)
+    }
+  })
+
+  test('rejects a fixed (degree: 0) joint -- there is no axis to attach a coupling to', () => {
+    const fixedJoint: Joint = { length: 1, degree: 0, position: new Vector3(1, 0, 0), V: new Matrix4(), Vinv: new Matrix4() }
+    expect(() => assembleThumbCmcJoint(fixedJoint, { aCoeff: 0, bCoeff: 0, r2: 0 })).toThrow()
   })
 })

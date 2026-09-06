@@ -1,7 +1,5 @@
 # TODO
 
-Maintained by hand, not claude.
-
 - [x] Decide de-duplication of `$lib/hand.ts` vs `src/routes/scan/lib/hand.ts` before extending
       either further (`scan3-architecture.md` already resolved this for `/scan3` itself — building on
       `$lib/hand.ts` — but the old `/scan` fork is still live).
@@ -15,51 +13,117 @@ Maintained by hand, not claude.
 
 ## literature search: Group A — bone lengths
 
-- [ ] Shortlist candidate anthropometric sources for per-segment hand-length regressions
+- [x] Shortlist candidate anthropometric sources for per-segment hand-length regressions
       (Buchholz, Armstrong & Goldstein 1992 "Anthropometric data for describing the kinematics of the human hand";
       the "Proportions of Hand Segments" scielo paper; others if found) — a scoping pass, not a commitment yet.
 
-- [ ] Fetch/read the leading candidate and confirm it actually publishes a per-segment mean/SD or regression-coefficient table
+- [x] Fetch/read the leading candidate and confirm it actually publishes a per-segment mean/SD or regression-coefficient table
       (not just a summary R² range) — the R² 0.49–0.99 figure already cited is secondhand;
       verify against the source before committing to it.
+      Buchholz's own table sits behind a paywall (couldn't fetch it); Buryanov & Kotiuk 2010 does
+      publish a full per-segment mean/SD table and was used instead — see handModelData.ts.
 
-- [ ] Reconcile the source's segment definitions against this project's landmark-based bone segments
+- [x] Reconcile the source's segment definitions against this project's landmark-based bone segments
       (wrist→MCP, MCP→PIP, PIP→DIP, DIP→tip) — clinical/anthropometric studies often measure bone-to-bone or crease-to-crease,
       not MediaPipe's skin-landmark convention; confirm they line up before transcribing anything.
+      Middle two segments line up cleanly; the distal segment needs bone+soft-tissue summed; the
+      metacarpal segment is a documented underestimate (missing the wrist-to-CMC carpal offset) — all
+      flagged in handModelData.ts's own comments.
 
-- [ ] Transcribe the chosen table's mean/SD (or regression coefficients) per segment into handModelData.ts,
+- [x] Transcribe the chosen table's mean/SD (or regression coefficients) per segment into handModelData.ts,
       each constant carrying a source comment (ConjunctCoupling's doc-comment convention).
 
-- [ ] Verify the transcribed seed against handModelData.test.ts's own stated criteria (every length positive, covariance matrices PSD) once both exist.
+- [x] Verify the transcribed seed against handModelData.test.ts's own stated criteria (every length positive, covariance matrices PSD) once both exist.
 
 ## literature search: Group E/F — DIP/PIP coupling and enslaving
 
-- [ ] Check whether the isometric-force enslaving literature already cited elsewhere in these docs
+- [x] Check whether the isometric-force enslaving literature already cited elsewhere in these docs
       (Kilbreath & Gandevia; "Matrix analyses of interaction among fingers in static force production tasks";
       the PMC "origin of finger enslaving" paper) publishes actual numeric finger-pair coefficients
       usable as a wide-covariance seed for Group F — separate from, and weaker than,
       this project's own kinematic fitEnslaving capture.
+      Zatsiorsky/Li/Latash 2003 does publish real numeric interfinger matrices, but they're an
+      isometric-force quantity, not this project's kinematic-angle one, and sit behind a paywall besides.
 
-- [ ] Separately check for DIP/PIP flexion-coupling literature (hand-therapy/biomechanics sources on Landsmeer's-ligament-driven coupling ratios) for Group E —
+- [x] Separately check for DIP/PIP flexion-coupling literature (hand-therapy/biomechanics sources on Landsmeer's-ligament-driven coupling ratios) for Group E —
       a different joint relationship than enslaving, needs its own search, not bundled with the above.
+      Only qualitative/anatomical descriptions found (Landsmeer's ligament itself), no numeric coupling
+      ratio anywhere.
 
-- [ ] For whichever of the two turns up a real source: decide explicitly whether the domain mismatch
+- [x] For whichever of the two turns up a real source: decide explicitly whether the domain mismatch
       (isometric force vs. kinematic angle; general population vs. this project's typing-specific interest)
       makes it worth using as a wide/uninformative-leaning seed,
       or whether "no usable source" should stand — a judgment call to make once the numbers are in hand, not before.
+      Judgment call: don't adopt the isometric-force numbers even loosely — different physical quantity,
+      not just a different population. See handModelData.ts's Group F comment.
 
-- [ ] If adopted: transcribe into handModelData.ts with a source comment and an explicit note on the domain-mismatch-driven wide covariance.
+- [x] If adopted: transcribe into handModelData.ts with a source comment and an explicit note on the domain-mismatch-driven wide covariance.
       If not adopted for either: leave as currently documented (uninformative prior, honestly flagged) — no further action.
+      Not adopted for either — left as the uninformative/interim priors already documented.
 
 ## `average-hand.md` implementation stages
 
-- [ ] Stage 1 — Types: `src/routes/scan3/lib/priors/handModel.ts` (`HandPriorState`)
-- [ ] Stage 2 — Seed data: `handModelData.ts` (blocked on the Group A task above)
-- [ ] Stage 3 — Solver: `ikSolve.ts` (per-frame constrained solve, Groups A–G unified per the
-      elbow-as-occluded-node reframing — see `goals.md`'s "Update mechanism")
-- [ ] Stage 4 — Promotion/posterior update: `update.ts`
-- [ ] Stage 5 — Render glue (reuses existing `SolvedHand.fkBy`/`worldPositions`, no new code)
-- [ ] Stage 6 — Read-only evaluation page: extend `scan-tests/multi-view/+page.svelte`
+- [x] Stage 1 — Types: `src/routes/scan3/lib/priors/handModel.ts` (`HandPriorState`)
+- [x] Stage 2 — Seed data: `handModelData.ts` (blocked on the Group A task above)
+- [x] Stage 3 — Solver: `ikSolve.ts` v1 (per-frame constrained solve). Covers Groups A–F and, now that
+      `$lib/hand.ts` has the ring/pinky CMC and thumb-saddle joints, Group D in full. Group G
+      (wrist/forearm/elbow) is solved as 5 plain scalars with the tenodesis cross-term implemented;
+      the forearm-length↔stature and elbow-swivel cross-terms are explicitly NOT implemented yet (the
+      first is a cross-session length-estimation concern for Stage 4, not a per-frame pose term; the
+      second needs real 3D geometry against the solved wrist pose, not a linear coefficient) — both
+      left as named gaps in ikSolve.ts's own doc comment, not invented numbers. No warm start /
+      temporal smoothness (see the already-checked item above) and no divergence recovery in this v1.
+- [x] Stage 4 — Promotion/posterior update: `update.ts`. Implements the standard scalar and vector
+      (Kalman) Bayesian updates, the exclusion gate, and `narrowViaTenodesis` (the one cross-group
+      correlation that actually narrows a Group G quantity today). Explicitly NOT implemented: the
+      "cross-session consistency" half of the promotion gate (comparing a new observation against
+      previous ones before trusting it) — no concrete algorithm for that exists anywhere in these docs
+      yet; `evidenceCount` tracking is added instead (a real piece of "session count" evidence
+      reporting, not itself a consistency check). No caller exists yet either — there's still no
+      `ScanSession` capture pipeline (see the top of this file) to call it from.
+- [x] Stage 5 — Render glue: `ikSolve.ts`'s `poseToLandmarkVectors`/`poseConfidenceSdDeg`. No new FK
+      math, per the spec — reuses `SolvedHand.fkBy`/`worldPositions` as-is, just maps chain positions
+      onto MediaPipe's landmark numbers via `CONNECTIONS`.
+- [x] Stage 6 — Read-only evaluation page: `scan-tests/multi-view/+page.svelte` now runs `ikSolve.ts`'s
+      solve every frame against a fixed literature-seed `HandPriorState` snapshot and renders the
+      corrected pose across the 8 side tiles (never the raw tracked frame) with per-landmark opacity
+      for confidence (`overlay.ts`'s `drawSkeletonView` gained a `landmarkOpacity` option for this).
+      Verified the route builds and renders with no console/runtime errors; not verified live against
+      a real camera feed in this pass.
+
+## `ikSolve.ts` v1 vs. `goals.md` — gaps found on reviewing goals.md against the actual code (2026-09-06)
+
+Stage 3 is marked done above because it runs and is tested, but re-reading `goals.md` against what
+`ikSolve.ts` actually does turned up three real, unimplemented requirements — none silently hidden in
+code comments the way Group G's other two cross-terms were, so calling them out explicitly here:
+
+- [ ] MCP's ab/ad range is supposed to mechanically choke as flexion increases (`goals.md`: "widest near
+      extension, mechanically choked as the joint flexes toward it, per collateral-ligament
+      tightening"). `mcpAxes[finger].abAdChokeCoeff` exists in `HandPriorState` and is seed-tested, but
+      `ikSolve.ts` never reads it — flexZ and abAdY are solved as independent ROM priors with no
+      coupling between them at all.
+- [ ] MCP's "low-weight third axial term" (`goals.md`: "a smaller flexion-phase-dependent axial rotation
+      ... never a single pooled axis") has no representation in `$lib/hand.ts`'s FK chain at all. Every
+      non-thumb MCP is `degree: 2` (two axes, no third); only `degree: 3` (thumb CMC) carries a derived
+      third rotation, via `conjunctCoupling`. Giving MCP the same mechanism (or an equivalent) is a
+      `$lib/hand.ts` FK-chain change of the same shape as the ring/pinky CMC fix already done — not
+      started.
+- [ ] The exclusion rule (`goals.md`: "An observation from an excluded condition (dorsal, thumb-lateral,
+      self-occluded) never enters the likelihood for that quantity, regardless of how many accumulate")
+      has no representation in `ikSolve.ts` at all — every frame's data term uses whatever `trackedPose`
+      recovers, unconditionally, with no notion of "this frame/orientation is excluded." `update.ts`
+      does have an `excluded` flag (and is tested for it), but that's the cross-session write path, not
+      the per-frame solve. `average-hand.md`'s own `ikSolve.test.ts` spec names this exact behavior ("a
+      synthetic excluded-condition observation is confirmed to never enter the objective, not merely
+      down-weighted") — untested and unimplemented here.
+
+Smaller, lower-priority note from the same pass:
+
+- [ ] The ROM term is a Gaussian penalty plus a hard clamp, not `average-hand.md`'s specified Beta
+      soft-limit density ("a soft limit, not a clamp"). Functionally similar at both extremes (near-free
+      when unconverged, near-hard-limit when confident), but the hard clamp is literally the mechanism
+      the spec says not to use. Not corrected here — flagging since it wasn't called out anywhere in
+      code comments when it was written.
 
 ## Validation (`test-plan.md`) not yet run
 
@@ -74,8 +138,12 @@ Maintained by hand, not claude.
 ## Not started, further out
 
 - [ ] `key-point-selection.md`'s Steps 0–5 (landmark-0 placement, cost-field sampling, packing,
-      cross-finger effects) — depends on `average-hand.md` stages 1–5 and on `$lib/hand.ts` gaining
-      the ring/pinky CMC and thumb-saddle FK joints it doesn't have today.
+      cross-finger effects) — `average-hand.md` stages 1–6 are now all done, and `$lib/hand.ts` has the
+      ring/pinky CMC and thumb-saddle FK joints (`calculateJoints` fits a real axis for ring/pinky's
+      base joint; `thumbCmc.ts`'s new `assembleThumbCmcJoint()` combines Phase 6a/6b's fitted pieces
+      into a real `degree: 3` joint). Not yet actually started as its own task, and still has its own
+      open questions beyond that dependency (no `ScanSession` capture pipeline exists yet to run any of
+      this against real per-user data — see the note on Stage 4 above).
 - [ ] Canonical `HandPriorState` spec doc (discussed, not yet started) — a single document giving
       the full data structure and cross-correlation table in detail, once `goals.md`/`average-hand.md`
       are far enough along that it's worth freezing.

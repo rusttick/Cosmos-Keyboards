@@ -133,7 +133,10 @@ function MAX_PAN(finger: Finger) {
  * wrist-to-CMC-landmark segment (`thumb[0]`) sits too close to the CMC's own pivot to carry much real
  * rotation — confirmed live and independently by published single-camera thumb motion capture research
  * (docs/thumbs/test_results.md, 2026-09-01). `joints.thumb[0]` should stay `degree: 0` (fixed), the
- * same convention every other finger's metacarpal already uses. */
+ * same convention index/middle's own metacarpal segment (`joints[finger][0]`) still uses. Ring and
+ * pinky are the one exception to that convention: unlike every other finger, their own base-of-hand
+ * joint carries a real, independent flexion of its own (see `calculateJoints`) — a different joint
+ * category from this one (no conjunct rotation, just a single hinge), not a second instance of it. */
 export interface ConjunctCoupling {
   aCoeff: number
   bCoeff: number
@@ -542,12 +545,21 @@ export class SolvedHand {
 export function calculateJoints(history: Hand[], means: Record<string, number[]>): Joints {
   return Object.fromEntries(
     FINGERS.map((l) => {
-      const deg1 = averageNorms(
-        history.map((h) => h.limbs[l][0]),
-        means[l][0],
-        new Matrix4(),
-        0,
-      )
+      // Ring and pinky each flex a small, independent amount at the base of the hand toward the
+      // palm (goals.md's "ring/pinky CMC mobility") -- a real rotation distinct from their knuckle's
+      // own flexion, not represented at all until now. Every other finger's base segment carries no
+      // real rotation of its own, so it stays a fixed average direction (`averageNorms`); ring/pinky's
+      // needs a fitted axis instead (`fitNorms`, the same mechanism every other driven joint already
+      // uses), so real per-user capture has something to fit.
+      const ringOrPinky = l === 'ringFinger' || l === 'pinky'
+      const deg1 = ringOrPinky
+        ? fitNorms(history.map((h) => h.limbs[l][0]), true, means[l][0], new Matrix4())
+        : averageNorms(
+          history.map((h) => h.limbs[l][0]),
+          means[l][0],
+          new Matrix4(),
+          0,
+        )
       const mat = deg1.V
 
       const rest = history.flatMap((h) => h.limbs[l].slice(1))

@@ -96,6 +96,26 @@ export function fitConjunctCoupling(
   return { aCoeff, bCoeff, r2 }
 }
 
+/** Combines Phase 6a's fitted axis (`fitThumbCmcAxis`, a plain `degree: 1` joint) with Phase 6b's
+ * fitted `conjunctCoupling` into the real `degree: 3` joint `$lib/hand.ts`'s `Joint` type already has a
+ * variant for -- the two phases fit their pieces separately, but nothing before this combined them into
+ * the one object `SolvedHand.fkBy`/`fromLimbs` actually needs for the thumb's base joint to render or
+ * solve correctly (see `ConjunctCoupling`'s doc comment in `hand.ts`; `average-hand.md`'s note that "the
+ * type exists, nothing wires it up yet" was about exactly this gap). */
+export function assembleThumbCmcJoint(axisJoint: Joint, conjunctCoupling: ConjunctCoupling): Joint {
+  if (axisJoint.degree === 0) {
+    throw new Error('assembleThumbCmcJoint needs a fitted (non-fixed) axis joint from fitThumbCmcAxis')
+  }
+  return {
+    length: axisJoint.length,
+    degree: 3,
+    V: axisJoint.V,
+    Vinv: axisJoint.Vinv,
+    conjunctCoupling,
+    axisConfidence: axisJoint.axisConfidence,
+  }
+}
+
 /** Phase 6b byproduct: thumb MCP/IP flexion, read the same signed way every other finger's flexion is
  * (limb boundary 1 = MCP-equivalent, 2 = IP-equivalent — see the labeling caveat already documented
  * for the thumb in flexion-sweep's methodology notes). No dedicated fit here — per scan_procedure.md

@@ -460,7 +460,16 @@ export function drawSkeletonView(
   normal: Vector3 | undefined,
   basis: { right: Vector3; up: Vector3 },
   scale: number,
-  options: { facingCamera?: boolean; throughScreen?: 'toward' | 'away'; label?: string } = {},
+  options: {
+    facingCamera?: boolean
+    throughScreen?: 'toward' | 'away'
+    label?: string
+    /** Per-landmark opacity (0-1), same indexing as `hand.vectors` -- e.g. a model's confidence in
+     * that landmark's current position, so a viewer can tell a genuinely converged joint from one
+     * merely sitting near an unconverged, wide prior. `undefined` for a landmark draws it at full
+     * opacity, same as when this option is omitted entirely. */
+    landmarkOpacity?: (number | undefined)[]
+  } = {},
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -488,13 +497,16 @@ export function drawSkeletonView(
     ctx.lineTo(pb.x, pb.y)
     ctx.stroke()
   }
-  ctx.fillStyle = '#a855f7'
-  for (const p of hand.vectors) {
+  hand.vectors.forEach((p, i) => {
+    const opacity = options.landmarkOpacity?.[i]
+    ctx.fillStyle = '#a855f7'
+    ctx.globalAlpha = opacity ?? 1
     const s = toScreen(p)
     ctx.beginPath()
     ctx.arc(s.x, s.y, 3, 0, 2 * Math.PI)
     ctx.fill()
-  }
+  })
+  ctx.globalAlpha = 1
 
   if (normal && options.throughScreen) {
     // The normal points along (or against) this view's own viewing axis -- its projection onto
