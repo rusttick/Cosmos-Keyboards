@@ -734,3 +734,44 @@ Per the user's own live assessment, on the current (uncalibrated, population-pri
 - The center-tile projection (`projectCorrectedOntoKeypoints`) is an orthographic approximation that ignores perspective foreshortening entirely — accurate for a hand roughly parallel to the camera's image plane, more visibly wrong for one angled sharply toward/away from it. Not yet characterized how wrong.
 - Bone-length ratios were only audited for gross implausibility (the `wristToCmc` fix above); no other segment was re-examined this session, and the user's own closing note flagged some ratios as "could still be tweaked" without specifying which.
 - This entire session worked on `average-hand.md`'s _population-prior_ model (`buildDefaultSkeleton(HAND_PRIOR_SEED, handedness)`) — none of it touched or validated per-user calibration (`calculateJoints`/`fitNorms`), which still produces `degree: 2` (unsplayed) MCP joints and has no fitted equivalent of any of this session's splay constants.
+
+---
+
+## 2026-09-06 — External multi-camera hand-pose datasets found, InterHand2.6M chosen, downloaded, and a first per-subject extraction pipeline built
+
+A separate thread from the `/scan3` capture-protocol work above: researching how to test/validate `handModelData.ts`'s priors surfaced three published research datasets, each built from real people's hands captured with multi-camera or depth rigs, independent of MediaPipe and of anything this project has assumed. Findings and decisions written up in `docs/thumbs/from-external-data.md`:
+
+- **FreiHAND** — multi-camera triangulation + human-QC'd MANO mesh fit, ~130k independent-still samples, non-commercial research license.
+- **InterHand2.6M** — a synchronized 34-color/46-monochrome-camera dome, ground truth from direct human-clicked multi-view triangulation (closest to model-free of the three), real continuous motion sequences, 27 subjects.
+- **DexYCB/HO-3D** — fewer views, MANO-fit optimization, object-grasping motion only; needs a MANO-decode step just to get raw joint positions out.
+
+**Decision: InterHand2.6M**, on strength of (a) it ships raw 3D joint positions directly, no MANO/neural-net decode needed, (b) real per-subject continuous motion, useful for coupling fits `handModelData.ts` currently has no source for at all (`dipPipCoupling`, `enslaving`), and (c) 27 subjects is enough to reserve some as a genuinely held-out test set later. Downloaded the annotation-only release (no images) to `external-data/interhand26m/` (gitignored, ~63MB): per-split `joint_3d.json`/`camera.json`, plus `skeleton.txt` and `subject.txt`.
+
+**A staged plan for turning this into `handModelData.ts` candidates was written to `docs/thumbs/interhand-2-average.md`** — verify the landmark remap before computing anything from it, hold out subjects before fitting anything, compute per-field candidates with an honest sanity check each, human review before any `handModelData.ts` edit, then check the result against the held-out subjects. Also settled, before writing any code: bone lengths, PIP/DIP ROM, and MCP/thumb ROM are the fields most likely to be usable from this source; true axial-roll twist and anything in `wristForearm` are not (no landmark data can recover them); true enslaving coefficients and the ring/pinky-base/true-MCP split are structurally limited by what a sparse landmark skeleton can and can't separate.
+
+### Built and verified against subject 0 (right hand, 417 valid frames across 44 pose sequences)
+
+All at `src/routes/scan3/lib/priors/interhand/`:
+
+- **`skeleton.ts`** — parses `skeleton.txt`'s (name, index, parentIndex) triples and _derives_ the remap from InterHand2.6M's raw joint order to this project's own (`$lib/hand.ts` `CONNECTIONS`) order, rather than hardcoding it from a one-time read. Finding: InterHand2.6M numbers each finger tip-to-base with the wrist last, the reverse of this project's wrist-first/base-to-tip convention — structurally compatible (same 21-landmark, no-separate-CMC-track layout) but not a direct pass-through. `skeleton.test.ts` validates the parsed tree (throws on a broken parent chain or a missing node rather than silently mismapping) and cross-checks the real downloaded file against a literal fixture — 6/6 pass.
+- **`loadFrames.ts`** — loads one subject's frames from a split's `joint_3d.json`, filters to one hand with every landmark valid, applies the remap.
+- **`fitBoneLengths.ts`** — per-subject bone-length ratios (to wrist-to-middle-fingertip hand length), including the thumb's `wristToCmc` segment, which `handModelData.ts` currently seeds as an explicit unsourced guess.
+- **`fitRom.ts`** — per-joint bend-angle (min/mean/max/SD), tagged with a `Directness` (`'clean-hinge'` / `'flex-abd-combined'` / `'joint-stacked'`) derived from `ikSolve.ts`'s own `degreesFor` joint structure, each with a variance multiplier (1x/4x/9x) so declared confidence reflects how directly the raw measurement maps to its target `HandPriorState` field, not just its sample spread. `fitRom.test.ts` (8 cases) verifies the angle math and the directness tagging itself.
+- **`segmentConsistency.ts`** — per-frame outlier filter: a frame is dropped for a given joint if either adjacent segment's length deviates >30% from that segment's own subject-median (threshold chosen from a real gap in the observed deviation distribution — smooth 0–25% climb through the bulk of frames, then a jump to 42%+ by the 90th percentile — not a guessed round number). `segmentConsistency.test.ts` (3 cases) verifies it.
+- **`subjectReport.ts`** — runs both fits for one subject and prints a side-by-side report against the current `handModelData.ts` seed; nothing writes to `handModelData.ts` automatically (Stage 4's human-review gate, deliberately not skipped).
+
+17/17 tests pass across the four test files.
+
+### What subject 0's numbers actually showed
+
+- **Bone lengths**: every finger's `metacarpal` (wrist-to-MCP) ratio came in far higher than the current seed (e.g. index 67.9% vs. 43.4%) — worked through as a likely genuine finding, not a bug: `handModelData.ts`'s own comments already flag this exact segment as bone-only (X-ray) vs. landmark-based (skin/wrist-crease) measurements disagreeing, and the gap size (~38mm) is anatomically plausible as the carpal-bone region neither source measures the same way. Total hand length matched the current seed almost exactly (156.5mm vs. 156.9mm), supporting this reading. Flagged as the strongest single candidate finding so far, pending review.
+- **ROM**: thumb's "MCP"/"IP" hinges — fields `ikSolve.ts` currently has _no_ prior for at all — got real first candidate numbers (mean 48.7°/26.9°, clean-hinge, no mapping penalty). `pipDipRom.dip` initially showed an impossible 147.7° max (ring finger) before outlier filtering; after filtering (57 frames excluded for that joint specifically, on the segment-consistency signal above) max dropped to a plausible 74.6°, comfortably inside the current 90° hard bound.
+
+### Still open
+
+- Nothing has been written to `handModelData.ts` — everything above is Stage 3/pre-Stage-4 output, explicitly not yet reviewed or committed as a model change.
+- Only subject 0, only the right hand, only `train` split frames — the other 26 subjects, left hands, and `val`/`test` frames are untouched.
+- The subject-level held-out split (`interhand-2-average.md` Stage 2) hasn't been created yet — no subject has been formally reserved for testing rather than fitting.
+- DIP/PIP coupling and the MCP ab/ad choke coefficient (ranked medium/low-confidence in the earlier research pass) haven't been attempted yet — only bone lengths and ROM were built this session, by deliberate scope choice.
+- The Stage 1 visual-render sanity check (rendering a remapped InterHand2.6M frame through the existing hand-rendering pipeline, side by side with `mediapipe_hand_reference.png` and a live `/scan` capture) was proposed but not built — numeric checks (skeleton-tree validation, bone-length invariance, segment-consistency filtering) stood in for it so far.
+- A per-subject "posterior" storage format (`fitted/subject-N-hand.json`, one small file per subject/hand, `reviewed: false` until Stage 4 sign-off) was designed in conversation but not yet implemented — subject 0's results currently exist only as `subjectReport.ts`'s console output, not as a saved artifact.

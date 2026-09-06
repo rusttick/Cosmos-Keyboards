@@ -138,6 +138,38 @@ three closed 2026-09-06:
       yet — that detection logic doesn't exist anywhere in this project yet either, so there's nothing
       to call it from until `/scan3`'s capture pipeline (or a live-view orientation guard) exists.
 
+extracting handpriorstate parameters from intrahand data:
+
+High confidence
+
+1. Bone-length ratios, most segments. Already demonstrated clean signal in what we just pulled — 16 of 20 segments held to 4–8% coefficient of variation across 417 real frames.
+   Rigid, no axis-convention dependency, directly measurable. The strongest candidate by a clear margin.
+2. The thumb's wristToCmc segment specifically. This is the one field handModelData.ts currently flags as a pure guess with no source at all — and it measured cleanly in the
+   same run (45.3mm mean, 4.8% CV). Directly fixes a named, explicit gap with real data. Arguably the single best win available here.
+
+Medium confidence
+
+3. ROM mean/SD (the "typical posture" half of BetaRom). Straightforward angle recovery (no axis-calibration issue for hinge magnitude), but InterHand2.6M's frames come from
+   deliberately posed gestures (fist, star_trek, good_luck, fingerspread...), not passive natural behavior — so what comes out is "typical of the poses subjects were asked to
+   perform," a real improvement over an eyeballed placeholder, but not quite the same thing as "typical of ordinary use." Worth doing, with that caveat stated plainly in the
+   source string.
+4. DIP/PIP coupling. The biomechanical linkage is real and the angle recovery is calibration-free, but the data is a set of discrete named poses rather than a continuous
+   flexion sweep — the regression's range and density depend on how well those specific gestures happen to span the flexion range, which varies. Likely to produce something,
+   uncertain whether it produces a tight fit.
+
+Low confidence
+
+5. MCP ab/ad choke coefficient. Requires imposing an unverified axis convention (already flagged as a structural risk), plus needs a decent number of frames per flexion bin —
+   with a few hundred frames spread across 44 discrete poses per subject, bins may be sparse. Real chance the number reflects the assumed convention more than the joint.
+6. Enslaving-adjacent co-flexion correlation. Numerically computable, but likely a worse proxy than even ordinary passive data: named multi-finger gestures (five_count,
+   fingerspread) are voluntary, coordinated poses by construction, so whatever correlation comes out would be dominated by intentional co-contraction even more than an
+   unstructured natural-motion dataset would be. Technically producible, weak claim to being the target quantity.
+
+Not feasible from this data
+
+7. axialRotationWeight / true axial roll. Already established as structurally unrecoverable without an independently known bone-axis convention this dataset doesn't provide.
+8. Anything in wristForearm. No forearm or elbow ever appears in InterHand2.6M's captures. Zero chance regardless of method.
+
 Smaller, lower-priority note from the same pass:
 
 - [ ] The ROM term is a Gaussian penalty plus a hard clamp, not `average-hand.md`'s specified Beta
