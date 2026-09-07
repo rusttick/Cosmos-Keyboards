@@ -45,6 +45,11 @@ see **`TODO.md`** for status.
   layout-independent kinematic usefulness) for judging whether a scan-pipeline change actually
   helped. `key-point-selection.md` reuses its manipulability/Jacobian construction directly.
 
+- **`keypress-vector-problems.md`** — problem framing (no experiments proposed yet) for turning a
+  reachable point into a keypress direction: two non-reconciled models already in this project
+  (kinematic Jacobian vs. geometric contact-sphere), contact-point geometry with no ground truth, and
+  several other open threads, named so they aren't accidentally resolved by omission.
+
 ## Validation — empirical grounding
 
 - **`test-plan.md`** — the sequence of small tests validating `capture-protocol.md`'s assumptions
