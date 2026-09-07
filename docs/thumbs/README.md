@@ -26,6 +26,10 @@ see **`TODO.md`** for status.
 
 ## Plan — staged rollout, expected to change as work lands
 
+- **`representing-keyboard-build-inputs.md`** — a staged plan for building a real 3D (Threlte) viewer
+  for `key-point-selection.md`'s per-finger capability field, starting from an empty scene and ending at
+  a cost-colored capability cloud, before any placement/packing algorithm exists.
+
 - **`average-hand.md`** — the current implementation plan: routes every attribute in `goals.md`
   and every live MediaPipe frame through one constrained solve (`ikSolve.ts`). This is what a
   developer should be building toward right now.
