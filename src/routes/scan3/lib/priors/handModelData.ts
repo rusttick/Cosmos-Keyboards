@@ -237,14 +237,21 @@ const mcpAxes: McpAxisPriors = Object.fromEntries(
 
 const cmcMobility: CmcMobilityPriors = {
   thumb: {
-    flexExtRom: rom(0, 53, 53, 10, ROUGH_ROM_SOURCE),
+    // meanDeg was 53 -- exactly == maxDeg, the same "mean pinned at the joint's own hard limit, not a
+    // typical posture" bug this file's pipDipRom/mcpAxes comment above already found and fixed
+    // (2026-09-06) for the other joints, just never applied here (found live, 2026-09-07, via
+    // docs/thumbs/representing-keyboard-build-inputs.md's Stage 7 neutral-pose skeleton visibly sitting
+    // in a corner of its own CMC sweep volume instead of its center). Recentered the same way: the
+    // plain minDeg/maxDeg midpoint, not another guessed number.
+    flexExtRom: rom(0, 53, 26.5, 10, ROUGH_ROM_SOURCE),
     // minDeg was 0 -- a hard floor with no room for adduction past whatever "neutral" 0 represents,
     // which real thumb CMCs do have a small range of (confirmed as a real gap while eyeballing
     // multi-view's static reference pose against docs/thumbs/mediapipe_hand_reference.png,
     // 2026-09-06: a plausible-looking rest stance needed roughly -10deg here). Widened to -15 for a
     // small margin past that, not a specific measured limit -- still ROUGH_ROM_SOURCE, just less
-    // artificially one-sided than before.
-    abAdRom: rom(-15, 42, 42, 10, ROUGH_ROM_SOURCE),
+    // artificially one-sided than before. meanDeg was 42 -- the same mean==maxDeg bug as flexExtRom
+    // above, recentered to the plain midpoint for the same reason.
+    abAdRom: rom(-15, 42, 13.5, 10, ROUGH_ROM_SOURCE),
     conjunctCoupling: {
       mean: [0, 0],
       covariance: [[1, 0], [0, 1]],

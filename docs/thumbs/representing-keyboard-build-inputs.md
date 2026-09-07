@@ -1,7 +1,12 @@
 # Representing keyboard-build inputs: a staged 3D visualization plan
 
-> **Status:** Plan, not started · Depends on: `key-point-selection.md`, `average-hand.md`, `goals.md`,
-> `scan-utility-evaluation.md` · Supersedes (for this purpose): `archive/sweep_region_preview.md`
+> **Status:** Completed, 2026-09-07 · Depends on: `key-point-selection.md`, `average-hand.md`, `goals.md`,
+> `scan-utility-evaluation.md` · Supersedes (for this purpose): `archive/sweep_region_preview.md` · See
+> `test-results.md`'s 2026-09-07 entry for what was built, bugs found, and lessons learned. Stages 0-8
+> are all implemented at `src/routes/scan-tests/capability-field/` and `src/routes/scan3/lib/keypoints/`.
+> The "Explicitly out of scope" section below remains genuinely out of scope — Step 0's real landmark-0
+> sampling, Step 3's packing, Step 5's cross-finger effects, and keyboard-shape rendering are all real
+> next steps, not done here.
 
 `key-point-selection.md` describes an algorithm that turns the hand-model posterior into key
 placements, but nothing in this project can currently _look at_ any part of that pipeline in 3D —

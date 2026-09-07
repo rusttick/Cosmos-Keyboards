@@ -1118,3 +1118,163 @@ also known to not match the person driving it.
   only literature's was root-caused this session.
 - No `/bones` measurements have been entered yet for either hand -- multi-view/`/bones` testing after
   that is the explicitly agreed next step, not yet started.
+
+---
+
+## 2026-09-07 -- `docs/thumbs/representing-keyboard-build-inputs.md` built and completed: a real 3D capability-field viewer, staged from an empty scene to cost-colored per-finger volumes
+
+A separate thread from the `/scan3` capture-protocol work above: `key-point-selection.md`'s Step
+1-2 candidate-space/cost-field algorithm had no way to be looked at in 3D -- every existing scan-tests
+page renders via HTML5 Canvas 2D, not this project's real 3D stack (`three`/`@threlte/core`/
+`@threlte/extras`). Planned in `docs/thumbs/representing-keyboard-build-inputs.md` as nine small,
+independently-verified stages (0-8), built and completed this session at
+`src/routes/scan-tests/capability-field/+page.svelte`, backed by tested modules under
+`src/routes/scan3/lib/keypoints/`. Adopted naming: **capability sample** (one `(position, joint-angles, posture cost, manipulability, positional uncertainty)` tuple), **capability field/cloud** (the
+collection), tied to the robotics "capability map" literature `key-point-selection.md` already cites --
+deliberately not "keypress space" (implies a 2D structure the model doesn't have) or "reachability"
+(already means something narrower and layout-_dependent_ elsewhere in this codebase).
+
+### What got built, stage by stage
+
+- **Stage 0-1**: empty lit scene (`Viewer.svelte` + `@threlte/extras`'s `Grid`/`AxesHelper`), then one
+  placeholder primitive to fix the mm-scale convention before real data existed.
+- **Stage 2**: a synthetic point cloud settling `CapabilityCloud.svelte`'s visual API -- switched from a
+  shell (hollow, sees through the volume) to a solid cubic-lattice fill on direct user feedback, since
+  real capability samples fill a volume, they don't lie on its boundary.
+- **Stage 3-4**: `sampleMcpSweep.ts` (one finger's MCP only, 2 free angles -- confirmed live to trace a
+  2D shell, not a volume) then `sampleFingerSweep.ts` (MCP + PIP, 3 free angles, DIP derived via
+  `dipPipCoupling` rather than independently sampled -- confirmed live to fill a genuine 3D volume).
+- **Stage 5-6**: generalized across all four non-thumb fingers (identity-colored, reusing
+  `PoseCanvas.svelte`'s existing finger/color convention), then the thumb's saddle joint isolated in its
+  own `sampleThumbCmcSweep.ts` (CMC's 2 driven axes only -- the thumb's other two joints have no prior
+  in `HandPriorState` at all, a real, already-identified schema gap, so they're held straight rather
+  than swept with invented numbers).
+- **Stage 7**: a plain skeleton (`RestSkeleton.svelte` -- joint spheres, bone lines, deliberately not the
+  rigged GLB mesh, so no specific hand shape is implied) via a new `restSkeletonLandmarks.ts`, later
+  extended with `neutralPose.ts` for a real "typical posture" pose (every joint's own fitted `meanDeg`,
+  not an assumed straight/extended hand).
+- **Stage 8**: three real per-sample costs -- `postureCost.ts` (Gaussian penalty against each joint's
+  fitted mean/SD, matching `ikSolve.ts`'s own existing simplification rather than the spec's Beta
+  density), `manipulability.ts` (numerical Jacobian + Yoshikawa's index, reused from
+  `scan-utility-evaluation.md`'s own machinery), `positionalUncertainty.ts` (posterior variance
+  propagated through the same Jacobian) -- exposed as two independently-selectable channels (color,
+  brightness), prompted directly by the user's own suggestion that color needn't be the only visual
+  channel: brightness scales `CapabilityCloud`'s existing per-instance `instanceColor`, chosen over true
+  per-instance transparency because three.js's standard materials don't read alpha from `instanceColor`
+  at all -- that would need a custom shader, not a prop.
+
+### Bugs found live, in the order they surfaced
+
+1. **`Text` (troika-three-text) silently broke `OrbitControls`.** Adding grid scale-reference labels via
+   `@threlte/extras`'s `Text` made drag-to-rotate stop responding entirely, reproducibly, though the
+   server never crashed and a fresh page load still rendered. Root cause not fully isolated (candidates:
+   `Text`'s own `forwardEventHandlers`/raycasting registration, or its async font-load/worker path) but
+   irrelevant once diagnosed -- swapped for `@threlte/extras`'s `HTML` component
+   (`pointerEvents="none"`, a plain non-interactive DOM overlay) instead, which fixed it immediately and
+   is a better fit for "2D text" than a WebGL mesh anyway.
+2. **A ~100x scale bug, the same class `multi-view`'s `projectCorrectedOntoKeypoints` hit in an earlier
+   session.** `buildDefaultSkeleton` (`ikSolve.ts`) bakes joint lengths as already-absolute millimeters
+   (`bones.mean[i] * handLength`), but `worldPositions`'s own default `scale=100` is calibrated for the
+   _other_ joint representation (`calculateJoints`'s live-tracking fit, where `length` is a plain
+   unitless ratio). Using the default silently double-applied the mm conversion -- fingertip positions
+   came out around 15,000mm instead of ~150mm, rendering nothing visible. Fixed with `scale=1`
+   everywhere a `buildDefaultSkeleton` skeleton is walked; locked in with a regression test asserting
+   fingertip-to-wrist distance stays in a plausible 50-400mm band.
+3. **Landmark-0 placeholder orientation was 90 degrees off, then upside down, by sign.** A plain-identity
+   landmark-0 position put the palm plane (`$lib/hand.ts`'s `fkBy` treats local Y as the palm normal --
+   confirmed live via a pure-flexion/pure-abduction probe) perpendicular to this viewer's ground grid.
+   `PLACEHOLDER_LANDMARK0_POSITION = makeRotationX(+PI/2)` fixed the perpendicularity but read as the
+   whole hand upside down; the user's own live read ("180 degrees around the red/x axis") was the fix --
+   flipped the sign to `makeRotationX(-PI/2)`, confirmed by rendering, not re-derived from first
+   principles. Same "live-verify signs, don't guess" practice this doc has needed for `thumbDepthSign`/
+   `signedJointAngle` elsewhere.
+4. **`neutralPose.ts`'s DIP angle was read from the wrong place.** Used `pipDipRom.dip[finger].meanDeg`
+   directly, but `sampleFingerSweep.ts` never treats DIP as independently sourced -- it's always derived
+   from PIP via `dipPipCoupling`. For the index finger this was a real ~10 degree discrepancy (21.3
+   derived vs. 31.1 direct), pulling the neutral-pose fingertip off of any pose the sweep itself could
+   ever produce -- confirmed by the user noticing the fingertip no longer sat on the sweep cloud's own
+   surface after the neutral-pose change landed. Fixed by deriving DIP the coupling way everywhere.
+5. **Ring/pinky's own base-of-hand flexion was never swept at all.** `$lib/hand.ts`'s
+   `degreesFor('ringFinger'|'pinky')` gives them a real `degree: 1` hinge at joint index 0 (unlike
+   index/middle's genuinely fixed `degree: 0` metacarpal) -- `goals.md`'s own "ring/pinky CMC" group,
+   modeling their independent flexion toward the thumb to cup the palm. `sampleFingerSweep.ts` held this
+   joint at `[0, 0]` for every finger regardless, so ring/pinky's own capability cloud never explored a
+   dimension the model actually has. Surfaced the same way as (4): the neutral pose (which does pose
+   this joint, via `neutralPose.ts`) landed visibly outside ring/pinky's sweep cloud specifically, not
+   index/middle's. Fixed by adding it as a real 4th swept dimension for ring/pinky only, at a coarser
+   resolution (4 steps) than the other three axes to bound the total sample count. This is a direct,
+   concrete instance of `key-point-selection.md`'s own named warning: excluding ring/pinky CMC mobility
+   "silently reproduces the 'rigid palm' assumption this whole model exists to remove" -- it had, quietly,
+   until the viewer made it checkable.
+6. **A second, unfixed instance of the already-documented "meanDeg pinned at maxDeg" bug.** The
+   2026-09-06 session (above) found and fixed `mcpAxes`/`pipDipRom` entries whose `meanDeg` sat exactly
+   at the joint's own hard limit rather than a typical-posture value, and recentered them to the plain
+   min/max midpoint. `cmcMobility.thumb.flexExtRom`/`abAdRom` had the identical bug (`meanDeg` == `maxDeg`
+   in both) but were missed by that pass entirely -- surfaced when the neutral-pose thumb landed in a
+   corner of its own CMC sweep volume rather than its center. Fixed the same way, on direct user
+   confirmation given the shared-seed blast radius: `flexExtRom` 53->26.5, `abAdRom` 42->13.5.
+
+### Diagnosed and deliberately left as-is: the knuckle-row "impossible" look
+
+At the neutral pose, ring/pinky's MCP position (landmarks 13/17) sits ~30mm below index/middle's
+(landmarks 5/9, exactly coplanar since their metacarpal has zero modeled DOF) -- a sharp discontinuity in
+the knuckle-row line rather than a smooth arch. Confirmed this is genuinely what the fused prior
+produces, not a bug: `cmcMobility.ring/pinky.flexionRom` is `rom(0, 30, 22.5, ...)`, tagged
+`ROUGH_ROM_SOURCE` -- 22.5 is 73% of the way to a real anatomical stop (`degree: 1`'s own maximum, per
+`sin(22.5deg) * ~80mm metacarpal ~= 31mm`, matching the observed drop almost exactly), not the
+exact-at-the-limit pattern the thumb bug above was, so it wasn't "fixed" the same way. Two separable
+causes, neither obviously wrong enough to silently override: the specific 22.5-degree figure is an
+uncited working guess that may be too aggressive for a genuinely relaxed "neutral" (as opposed to an
+actively-gripping) posture; and index/middle's metacarpal being modeled as _exactly_ rigid (`goals.md`
+itself calls the real joint "near-rigid," not perfectly rigid) structurally guarantees a discontinuity
+regardless of ring/pinky's own number. Left both alone on explicit user direction: this display's job
+right now is troubleshooting the prior/scan data and the resulting motion model, not presenting a
+polished result, so a visibly-implausible neutral pose that traces back to an honestly-flagged rough
+placeholder is the display doing its job, not failing at it.
+
+### Lessons learned
+
+**A visualization can be a real bug-finding tool, not just a deliverable, if it's built to expose
+internal consistency.** Three of the six bugs above (DIP-derivation mismatch, ring/pinky's missing
+sweep dimension, the thumb CMC data bug) were found purely by checking whether a pose computed one way
+(the neutral-pose function) landed inside a volume computed another way (the sweep sampler) -- both
+already existed and were individually "correct" in isolation, but the viewer made their disagreement
+visible in a way neither one's own unit tests could, since each only tested itself. Worth designing
+future diagnostic tooling around this same "two independently-computed views of the same posterior
+should agree" check, not just "does this one number look plausible."
+
+**Sign and orientation conventions in this codebase still need live verification, every time, no matter
+how carefully reasoned in advance.** The landmark-0 placeholder's rotation direction was derived
+correctly on paper (map the palm-normal axis onto the grid's up axis) but still came out upside down in
+practice, and the fix was "the user looked at it and said which way," not a corrected derivation. Same
+practice this whole document has needed repeatedly for `thumbDepthSign`, `signedJointAngle`, and
+`handPlaneNormal`'s handedness sign -- add this session's landmark-0 rotation to that list.
+
+**A single already-fixed bug pattern is worth grepping for elsewhere before assuming it's contained.**
+The "meanDeg pinned at the joint's own maxDeg" bug was found and fixed once (2026-09-06, `mcpAxes`/
+`pipDipRom`) but silently persisted in `cmcMobility.thumb`, in the same file, seeded around the same
+time, simply not touched by that pass. The fix pattern (recenter to the plain midpoint) was already
+established and required no new judgment call -- only noticing it needed to be applied again.
+
+**Brightness/scale are real, cheap second visual channels on top of `InstancedMesh` color; per-instance
+transparency is not.** `instanceColor` already gave per-marker color for free; scaling that color by a
+second, independently-selected cost (posture cost driving hue, positional uncertainty simultaneously
+driving brightness, say) cost nothing more than arithmetic. True per-instance alpha would need a custom
+shader, since three.js's standard materials don't read an alpha channel from `instanceColor` -- worth
+remembering as a real technical boundary, not just an implementation preference, next time a "can we show
+two things at once" request comes up against `InstancedMesh`.
+
+### Still open
+
+- The knuckle-row discontinuity above (`cmcMobility.ring/pinky.flexionRom`'s specific `meanDeg`, and
+  index/middle's exactly-zero-mobility simplification) -- deliberately left unresolved, flagged for
+  whenever real per-user or literature data can replace the rough placeholder.
+- `docs/thumbs/representing-keyboard-build-inputs.md`'s own remaining open item (landmark-0's placeholder
+  position/orientation isn't visually marked as a placeholder on-screen) -- explicitly deprioritized by
+  the user ("good starting point... no need to tweak it further now"), not fixed.
+- Everything the plan doc scoped out from the start remains genuinely not started: Step 0's real
+  landmark-0 sampling, Step 3's cost-weighted packing into key candidates, Step 5's cross-finger effects
+  (clearance/blocking/accidental-activation), and any keyboard-shape rendering at all.
+- Only `indexFinger`/`middleFinger`/`ringFinger`/`pinky`/`thumb` for a single `'Right'` hand and the
+  `[LITERATURE_SOURCE, INTERHAND_0_SOURCE]` fused prior were exercised this session -- `'Left'`
+  handedness and other/future `PriorSource`s haven't been run through this viewer at all.
