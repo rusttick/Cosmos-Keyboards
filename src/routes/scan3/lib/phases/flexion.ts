@@ -15,6 +15,10 @@ export interface DipPipCoupling {
   slope: number
   intercept: number
   r2: number
+  /** OLS coefficient covariance `[[var(slope), cov], [cov, var(intercept)]]` -- the same shape
+   * `dipPipCoupling[finger].covariance` expects, so a caller can fold this fit into a `HandPriorState`
+   * belief (`fuseSources.ts`) directly instead of only displaying slope/intercept/R^2. */
+  covariance: [[number, number], [number, number]]
 }
 
 export interface DipPipSample {
@@ -70,7 +74,20 @@ export function fitDipPipCoupling(history: Hand[], finger: Finger): DipPipFit {
   const ssTot = sum(pairs.map(([, dip]) => (dip - meanDip) ** 2))
   const r2 = ssTot === 0 ? 1 : 1 - ssRes / ssTot
 
-  return { slope, intercept, r2, samples }
+  // Standard OLS coefficient-covariance formula, two fitted parameters (n-2 residual degrees of
+  // freedom) -- same derivation as scan3/lib/priors/interhand/fitDipPipCoupling.ts's `ols()`.
+  const sigma2 = n > 2 && variancePip > 0 ? ssRes / (n - 2) : Infinity
+  const varSlope = variancePip > 0 ? sigma2 / variancePip : Infinity
+  const varIntercept = variancePip > 0 ? sigma2 * (1 / n + meanPip ** 2 / variancePip) : Infinity
+  const covSlopeIntercept = variancePip > 0 ? (-sigma2 * meanPip) / variancePip : 0
+
+  return {
+    slope,
+    intercept,
+    r2,
+    covariance: [[varSlope, covSlopeIntercept], [covSlopeIntercept, varIntercept]],
+    samples,
+  }
 }
 
 function sum(xs: number[]) {

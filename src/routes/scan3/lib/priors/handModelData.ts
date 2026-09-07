@@ -161,6 +161,24 @@ const boneLengths: BoneLengthPriors = {
       [M.pinky, PP.pinky, PM.pinky, combineSoftTissue(PD.pinky, TIP.pinky)],
     ),
   },
+  // Adjacent-knuckle (MCP-to-MCP) spacing: no source found reporting this specific measurement (most
+  // anthropometry tables report an overall "hand breadth across the metacarpals," not the three
+  // individual adjacent gaps) -- these are rough eyeballed millimeter figures, narrowing gently
+  // pinky-ward the same way the metacarpal bone lengths themselves already do, NOT derived from
+  // ikSolve.ts's old fixed fan-angle convention (back-computing what that angle implied for actual
+  // spacing gives ~12/8/6mm, well under a real adult hand's ~15-20mm adjacent-knuckle gaps -- carrying
+  // that number forward under a new name would just be the same "way off" problem restated). Wide SD
+  // reflects that this is a first guess, meant to be replaced via /bones caliper measurement, not a
+  // real population estimate.
+  knuckleRow: (() => {
+    const mm = [20, 18, 16]
+    const sdMm = [6, 6, 6]
+    return {
+      mean: mm.map(v => v / HAND_LENGTH_MM),
+      covariance: sdMm.map((sd, i) => sdMm.map((_, j) => (i === j ? (sd / HAND_LENGTH_MM) ** 2 : 0))),
+      source: 'rough eyeballed figure, no source found for adjacent inter-MCP spacing specifically; replace via /bones caliper measurement',
+    }
+  })(),
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -175,16 +193,27 @@ function rom(minDeg: number, maxDeg: number, meanDeg: number, sdDeg: number, sou
 
 const ROUGH_ROM_SOURCE = 'rough working figure, not checked against a specific named paper'
 
+// meanDeg below used to sit at (or, for MCP, exactly AT) each joint's own maxDeg -- not a "typical
+// posture" figure at all, the anatomical LIMIT. `solvePose` (ikSolve.ts) pulls every tracked frame
+// partway toward meanDeg regardless of what was actually tracked, so this silently dragged a genuinely
+// extended real hand toward near-maximum flexion every time -- confirmed directly, 2026-09-06: feeding
+// a perfectly straight (0deg) synthetic frame through solvePose against this seed alone produced ~25deg
+// of injected MCP flexion, ~18deg PIP, ~6deg DIP, on a hand that started dead straight. Recentered to
+// the honest "no real data yet" default -- the plain midpoint of minDeg/maxDeg -- rather than another
+// guessed number; real per-joint typical-posture data (a captured resting-posture measurement, or a
+// population fit) should replace this outright once it exists, not just retune the guess again.
 const pipDipRom: PipDipRomPriors = {
-  pip: Object.fromEntries(NON_THUMB_FINGERS.map(f => [f, rom(0, 110, 90, 10, ROUGH_ROM_SOURCE)])) as PipDipRomPriors['pip'],
-  dip: Object.fromEntries(NON_THUMB_FINGERS.map(f => [f, rom(0, 90, 47.5, 13, ROUGH_ROM_SOURCE)])) as PipDipRomPriors['dip'],
+  pip: Object.fromEntries(NON_THUMB_FINGERS.map(f => [f, rom(0, 110, 55, 10, ROUGH_ROM_SOURCE)])) as PipDipRomPriors['pip'],
+  dip: Object.fromEntries(NON_THUMB_FINGERS.map(f => [f, rom(0, 90, 45, 13, ROUGH_ROM_SOURCE)])) as PipDipRomPriors['dip'],
 }
 
 const mcpAxes: McpAxisPriors = Object.fromEntries(
   NON_THUMB_FINGERS.map(f => [
     f,
     {
-      flexExtRom: rom(-20, 90, 90, 8, ROUGH_ROM_SOURCE),
+      // meanDeg recentered from 90 (== maxDeg, the joint's own hard limit) to the minDeg/maxDeg
+      // midpoint -- see pipDipRom's own comment just above for why and what this was doing.
+      flexExtRom: rom(-20, 90, 35, 8, ROUGH_ROM_SOURCE),
       abAdRom: rom(
         -20,
         20,

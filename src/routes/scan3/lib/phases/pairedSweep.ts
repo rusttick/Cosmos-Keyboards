@@ -14,6 +14,14 @@ import type { Finger } from '$lib/hand'
 export interface Enslaving {
   coefficient: number
   r2: number
+  /** Coefficient variance, standard through-origin OLS formula (`sigma^2 / sum(dI^2)`, `sigma^2` from
+   * the residual sum of squares with one fitted parameter) -- lets a caller fold this into a
+   * `HandPriorState`-shaped belief (`fuseSources.ts`'s precision-weighted fusion) instead of only
+   * displaying the coefficient/R^2 pair. */
+  variance: number
+  /** Number of i-dominant frame-pairs the fit actually used -- small `n` means `variance` itself is a
+   * rough estimate, worth surfacing alongside it rather than trusting a low-n fit at face value. */
+  n: number
 } // E[i][j] ≈ Δθ_j/Δθ_i
 
 export interface EnslavingOptions {
@@ -69,7 +77,12 @@ export function fitEnslaving(angleI: number[], angleJ: number[], options: Partia
   const ssY = sum(dominantDeltaJ.map((dJ) => dJ * dJ))
   const r2 = ssY === 0 ? 1 : 1 - ssRes / ssY
 
-  return { coefficient, r2 }
+  const n = dominantDeltaI.length
+  // One fitted parameter (through-origin, no intercept) -> n-1 residual degrees of freedom.
+  const sigma2 = n > 1 && sumII > 0 ? ssRes / (n - 1) : Infinity
+  const variance = sumII > 0 ? sigma2 / sumII : Infinity
+
+  return { coefficient, r2, variance, n }
 }
 
 function sum(xs: number[]) {

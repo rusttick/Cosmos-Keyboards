@@ -75,11 +75,22 @@ export interface FingerBoneLengths extends VectorPrior {
   segments: FingerBoneSegment[]
 }
 
+/** Order `knuckleRow`'s 3 entries are always in: adjacent MCP-to-MCP gaps, index-to-pinky. */
+export const KNUCKLE_ROW_PAIRS = ['indexToMiddle', 'middleToRing', 'ringToPinky'] as const
+
 export interface BoneLengthPriors {
   /** The reference length everything else is a ratio of, in millimeters: the standard
    * wrist-to-middle-fingertip "hand length" measurement used in hand anthropometry. */
   handLength: ScalarPrior
   fingers: Record<Finger, FingerBoneLengths>
+  /** Straight-line MCP-to-MCP distances (ratio to `handLength`) for the three adjacent non-thumb
+   * knuckle pairs, in `KNUCKLE_ROW_PAIRS` order -- anatomically close to fixed (the metacarpals'
+   * relative spacing barely changes with finger motion, much like a within-finger bone length), but
+   * never actually modeled before this field existed: `ikSolve.ts`'s `buildDefaultSkeleton` used a
+   * fixed, uncited fan angle for joint-0 splay instead of any real measured spacing. `ikSolve.ts` now
+   * derives that splay geometrically (law of cosines) from this field plus each finger's own
+   * `fingers[finger]` metacarpal length -- see its own doc comment. */
+  knuckleRow: VectorPrior
 }
 
 // ---------------------------------------------------------------------------------------------------

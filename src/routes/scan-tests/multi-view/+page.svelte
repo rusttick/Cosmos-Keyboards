@@ -21,7 +21,9 @@
     poseToLandmarkVectors,
     solvePose,
   } from '../../scan3/lib/priors/ikSolve'
-  import { HAND_PRIOR_SEED } from '../../scan3/lib/priors/handModelData'
+  import { fuseHandPriorState } from '../../scan3/lib/priors/fuseSources'
+  import type { PriorSource } from '../../scan3/lib/priors/priorSource'
+  import PriorSourceChecklist from '../lib/PriorSourceChecklist.svelte'
 
   // The center tile is the real video with the corrected/model-solved hand projected on top of it (an
   // orthographic approximation -- see projectCorrectedOntoKeypoints's doc comment -- since this
@@ -47,12 +49,22 @@
   // all 3 drawn axes fixed in every view, not just the normal.
   const STALL_RESET_SECONDS = 3
 
-  // average-hand.md Stage 6: this page never writes to HandPriorState, so it's loaded once here as a
-  // fixed snapshot for the whole session -- "initially just the literature seed," per the spec, since
-  // there's no capture-session pipeline yet to load a per-user posterior from instead. `skeleton` has
-  // no per-user calibration behind it either (see buildDefaultSkeleton's own doc comment) -- this page
-  // is meant for watching how the *model* constrains a frame, not for judging a specific hand's fit.
-  const priorSnapshot = HAND_PRIOR_SEED
+  // average-hand.md Stage 6: this page never writes to HandPriorState -- what's loaded here is always
+  // a fused, in-memory SNAPSHOT (see fuseSources.ts), never a mutation of any registered source.
+  // `selected` tracks which of ALL_PRIOR_SOURCES (registry.ts) are currently checked; every source is
+  // an equal, independent peer (fuseSources.ts's whole point) -- there's no privileged "base" source,
+  // the literature seed included, so checking/unchecking it behaves exactly like any subject's box.
+  // Starts with just the literature seed checked (closest to this page's original fixed behavior), but
+  // nothing stops unchecking it entirely once other sources exist. `skeleton` has no per-user
+  // calibration behind it either way (see buildDefaultSkeleton's own doc comment) -- this page is meant
+  // for watching how the *model* constrains a frame, not for judging a specific hand's fit.
+  // Prior-source checklist factored into a shared component (PriorSourceChecklist.svelte) so this page
+  // and /bones always offer the exact same registered sources -- see that component's own doc comment.
+  let selectedSources: PriorSource[] = []
+  // Fused separately per hand from the SAME selection -- `handedness` (declared below, the page's own
+  // "which real hand am I tracking" selector) picks which half of every selected source's pair feeds
+  // the live solve/rest-tile below; it never mixes a source's Right half with another's Left half.
+  $: priorSnapshot = fuseHandPriorState(selectedSources, handedness)
   const MAX_SD_DEG_FOR_OPACITY = 60
   const UNMODELED_OPACITY = 0.25
   function opacityFromSdDeg(sdDeg: number | undefined): number {
@@ -138,11 +150,20 @@
   $: restHand = { vectors: restVectors }
   $: restAxes = palmBasisAxes(restVectors, handedness)
 
+  // Fixed real-world height for the model-rest tile, so different loaded priors' actual hand SIZE is
+  // visually comparable (a bigger fitted hand renders bigger, a smaller one smaller) instead of each
+  // auto-normalizing to fill the same fraction of the tile regardless of its real length -- the auto-fit
+  // scale every other (live) tile still uses. `poseToLandmarkVectors`/`SolvedHand.worldPositions()`'s
+  // default `scale=100` means 1mm of real bone length becomes 100 vector units, so converting a desired
+  // millimeter height into a pixels-per-unit scale needs that *100 factored in below. 180mm is a rough
+  // "about as tall as a real adult hand, wrist to fingertip" pick, not a cited figure -- adjust directly
+  // if a specific prior's hand runs off the tile or renders too small to read.
+  const MODEL_REST_FIXED_HEIGHT_MM = 180
+  const WORLD_POSITIONS_UNITS_PER_MM = 100
+
   function drawRestTile() {
     if (!tile0) return
-    const refLen = restVectors[0].distanceTo(restVectors[9]) || 1
-    const tileSize = Math.min(tile0.width, tile0.height) || 200
-    const scale = (tileSize * 0.4) / refLen
+    const scale = tile0.height / (MODEL_REST_FIXED_HEIGHT_MM * WORLD_POSITIONS_UNITS_PER_MM)
     // At `restPose` every finger reaches away from the wrist in only one screen direction (up, given
     // REST_VIEW_BASIS.up = local +X, the reach axis) -- same one-directional-extent issue the live
     // Top/Bottom tiles have, fixed the same way: pin the wrist near the bottom edge instead of dead
@@ -297,20 +318,23 @@
         const correctedVectors = poseToLandmarkVectors(skeleton, solved.pose)
         const axes = palmBasisAxes(correctedVectors, hand.handedness)
 
-        // Center tile: the corrected/model-solved hand, projected onto the real video via
-        // `projectCorrectedOntoKeypoints`'s orthographic approximation -- so this tile answers "does
-        // the solved model actually look like the real tracked hand," which the old raw-keypoints
-        // overlay here couldn't (it only ever showed the *raw* tracker's own opinion of itself). This
-        // is deliberately the CURRENT, un-fixed `buildDefaultSkeleton` (identity per-joint splay,
-        // known-degenerate palm normal) -- the "before" half of a before/after comparison once that
-        // splay gets a real fix, not yet that fix itself.
+        // Center tile: raw MediaPipe keypoints in blue, BEHIND the corrected/model-solved hand in
+        // yellow/purple on top -- so the two can be visually compared directly (how far the model's
+        // correction actually pulls the pose from what was tracked), not just inferred from the
+        // residual number below. Raw keypoints are already in the same normalized image-space
+        // `drawHandOverlay` expects, no projection needed (unlike the corrected layer, which has to go
+        // through `projectCorrectedOntoKeypoints`'s orthographic approximation since it starts in 3D
+        // model space). Raw layer clears the canvas (`clear` defaults true); the corrected layer is
+        // drawn with `clear: false` so it layers on top instead of erasing the raw one first.
+        drawHandOverlay(centerCanvas, hand.hand.keypoints, { color: '#38bdf8' })
+
         const correctedKeypoints = projectCorrectedOntoKeypoints(
           hand,
           correctedVectors,
           centerCanvas.width,
           centerCanvas.height
         )
-        drawHandOverlay(centerCanvas, correctedKeypoints)
+        drawHandOverlay(centerCanvas, correctedKeypoints, { clear: false })
         drawAxisTriadOverlay(centerCanvas, correctedKeypoints, axes)
 
         if (elapsed - lastDisplayUpdate >= displayRefreshIntervalSeconds) {
@@ -390,6 +414,10 @@
           <option value="Left">Left</option>
         </select>
       </label>
+    </div>
+
+    <div class="mb-4">
+      <PriorSourceChecklist bind:selectedSources />
     </div>
   </div>
 

@@ -68,16 +68,30 @@ function drawArrow2D(
  * drawing these already-mirrored coordinates raw, on an unmirrored canvas overlaying the mirrored
  * video, is what lines them up. Mirroring the canvas too double-flips the overlay against real hand
  * motion (found the hard way — see docs/thumbs/test_results.md). */
-export function drawHandOverlay(canvas: HTMLCanvasElement, keypoints: { x: number; y: number }[] | undefined) {
+export function drawHandOverlay(
+  canvas: HTMLCanvasElement,
+  keypoints: { x: number; y: number }[] | undefined,
+  options: {
+    /** Line/dot color pair -- defaults to the original yellow/purple. Pass a single color (e.g. a raw
+     * MediaPipe layer drawn in blue underneath a corrected-model layer) to draw both edges and
+     * landmarks in it, for a visually distinct "this is a different hand" layer on the same canvas. */
+    color?: string
+    /** `false` to skip the initial `clearRect` -- for layering a second call on the same canvas on top
+     * of a first one without erasing it (e.g. multi-view's raw-MediaPipe-behind-corrected-model
+     * comparison). Defaults to `true`, matching every existing caller's expectation that this function
+     * owns and clears the whole canvas. */
+    clear?: boolean
+  } = {},
+) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  if (options.clear ?? true) ctx.clearRect(0, 0, canvas.width, canvas.height)
   if (!keypoints) return
 
   const w = canvas.width
   const h = canvas.height
 
-  ctx.strokeStyle = '#facc15'
+  ctx.strokeStyle = options.color ?? '#facc15'
   ctx.lineWidth = 2
   for (const [a, b] of HAND_DRAW_EDGES) {
     ctx.beginPath()
@@ -86,7 +100,7 @@ export function drawHandOverlay(canvas: HTMLCanvasElement, keypoints: { x: numbe
     ctx.stroke()
   }
 
-  ctx.fillStyle = '#a855f7'
+  ctx.fillStyle = options.color ?? '#a855f7'
   for (const p of keypoints) {
     ctx.beginPath()
     ctx.arc(p.x * w, p.y * h, 4, 0, 2 * Math.PI)
@@ -523,6 +537,11 @@ export function drawSkeletonView(
      * merely sitting near an unconverged, wide prior. `undefined` for a landmark draws it at full
      * opacity, same as when this option is omitted entirely. */
     landmarkOpacity?: (number | undefined)[]
+    /** Draws each landmark as a larger circle with its index number inside, instead of the small plain
+     * dot -- for a page where identifying a specific landmark by number is the point (`/bones`'s
+     * caliper-entry tool), not a live-tracking view where 21 numbered circles would just be clutter.
+     * Off by default so every existing caller (multi-view's 8 tiles) is unaffected. */
+    showLandmarkNumbers?: boolean
     /** Where landmark 0 (the wrist -- this function's projection origin) lands on screen. Defaults to
      * dead center, which is wrong for a view where the hand only ever extends away from the wrist in
      * one screen direction (e.g. a Top/Bottom view looking straight down the palm normal, where every
@@ -560,16 +579,26 @@ export function drawSkeletonView(
     ctx.lineTo(pb.x, pb.y)
     ctx.stroke()
   }
+  const landmarkRadius = options.showLandmarkNumbers ? 10 : 3
   hand.vectors.forEach((p, i) => {
     const opacity = options.landmarkOpacity?.[i]
     ctx.fillStyle = '#a855f7'
     ctx.globalAlpha = opacity ?? 1
     const s = toScreen(p)
     ctx.beginPath()
-    ctx.arc(s.x, s.y, 3, 0, 2 * Math.PI)
+    ctx.arc(s.x, s.y, landmarkRadius, 0, 2 * Math.PI)
     ctx.fill()
+    if (options.showLandmarkNumbers) {
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 10px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(String(i), s.x, s.y + 0.5)
+    }
   })
   ctx.globalAlpha = 1
+  ctx.textAlign = 'start'
+  ctx.textBaseline = 'alphabetic'
 
   if (normal && options.throughScreen) {
     // The normal points along (or against) this view's own viewing axis -- its projection onto
@@ -628,12 +657,16 @@ export function drawAxisTriad(
    * `origin` was passed to the `drawSkeletonView` call this layers on top of, or the triad renders
    * rooted at the wrong point. Defaults to canvas center, matching drawSkeletonView's own default. */
   origin?: { x: number; y: number },
+  /** Multiplies the default arrow length (35% of the canvas's shorter side) -- e.g. 0.5 for a view
+   * where the full-length triad covers up other detail (`/bones`' numbered landmarks). Defaults to 1,
+   * so every existing caller is unaffected. */
+  lengthScale = 1,
 ): void {
   const ctx = canvas.getContext('2d')
   if (!ctx || !hand) return
 
   const w = origin ?? { x: canvas.width / 2, y: canvas.height / 2 }
-  const len = Math.min(canvas.width, canvas.height) * 0.35
+  const len = Math.min(canvas.width, canvas.height) * 0.35 * lengthScale
   const dotThreshold = len * 0.08
 
   const entries: [Vector3, string][] = [

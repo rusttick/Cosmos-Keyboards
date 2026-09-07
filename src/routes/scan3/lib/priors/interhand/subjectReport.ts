@@ -39,7 +39,7 @@ async function main() {
     const candidate = bones.fingers[finger]
     const current = HAND_PRIOR_SEED.boneLengths.fingers[finger]
     candidate.segments.forEach((seg, i) => {
-      const currentIdx = current.segments.indexOf(seg)
+      const currentIdx = (current.segments as string[]).indexOf(seg)
       const currentRatio = currentIdx >= 0 ? current.mean[currentIdx] : undefined
       const candidateRatio = candidate.mean[i]
       const sd = Math.sqrt(candidate.variance[i])

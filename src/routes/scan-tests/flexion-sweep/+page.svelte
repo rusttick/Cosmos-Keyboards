@@ -12,12 +12,46 @@
     objectFromFingers,
     signedJointAngle,
   } from '$lib/hand'
+  import type { NonThumbFinger } from '../../scan3/lib/priors/handModel'
   import { type DipPipFit, fitDipPipCoupling } from '../../scan3/lib/phases/flexion'
+  import { DEFAULT_ONE_EURO_OPTIONS } from '../lib/landmarkFilter'
+  import { fitEnslavingAll } from '../../scan3/lib/phases/pairedSweep'
+  import {
+    type FlexionSweepFragment,
+    HANDEDNESSES,
+    mergeFlexionSweepFragment,
+    myHandPrior,
+    resetMyHandPrior,
+    serializeMyHandPriorModule,
+  } from '../../scan3/lib/priors/myHandStore'
+  import type { PartialHandPriorState } from '../../scan3/lib/priors/priorSource'
 
   type Phase = 'idle' | 'recording'
 
+  // One store, both hands inside it (myHandStore.ts's own doc comment: never pooled into one shared
+  // belief -- this project's own capture data already found real per-hand asymmetry in DIP/PIP
+  // coupling). Both shown below regardless of which hand is currently selected for capture, so
+  // progress on both is visible at a glance. `?? {}` so the template can index either side safely even
+  // before it's ever been swept.
+  let myHandByHandedness: Record<Handedness, PartialHandPriorState>
+  $: myHandByHandedness = {
+    Right: $myHandPrior.Right ?? {},
+    Left: $myHandPrior.Left ?? {},
+  }
+
+  const NON_THUMB_FINGERS = FINGERS.filter((f): f is NonThumbFinger => f !== 'thumb')
   const BIN_WIDTH_DEG = 10
   const BIN_COUNT = 9 // 0-10, 10-20, ..., 80-90 -- palm-facing (0deg) through full lateral (90deg)
+  // Only these low bins (nearest true palm-facing, the orientation capture-protocol.md actually
+  // specifies for flexion elicitation) feed `myHandPrior` -- the rest exist purely for the
+  // orientation-bias diagnostic table below, since Test 4 already found confidence/noise degrading well
+  // before 90deg. Originally just bin 0 (0-10deg) alone -- widened to 0-2 (0-30deg) after real capture
+  // showed bin 0 staying empty for entire sweeps (a real hand rarely holds dead-on 0deg palm angle for
+  // 2+ consecutive frames while also actively flexing/extending), which silently starved ROM of any
+  // data every single run while DIP/PIP coupling and enslaving -- pooled across ALL bins regardless of
+  // angle -- kept populating normally. 0-30deg is still comfortably inside the low-bias range Test 4's
+  // degradation was gradual through, not a return to the original single-bin strictness.
+  const PRIOR_SOURCE_MAX_BIN = 2
   const CONFIDENCE_THRESHOLD = 0.7
   const STALL_RESET_SECONDS = 3
 
@@ -27,10 +61,10 @@
   const DUMMY_MEANS: Record<Finger, number[]> = objectFromFingers(() => [1, 1, 1, 1])
 
   interface Bin {
-    index: number // 0..BIN_COUNT-1; covers [index*BIN_WIDTH_DEG, (index+1)*BIN_WIDTH_DEG) degrees
-    history: Hand[] // full per-frame Hand objects — calculateJoints needs the whole batch, not a running stat
+    index: number
+    history: Hand[]
     acceptedFrames: number
-    romMin: number[] // per joint (1, 2, 3)
+    romMin: number[]
     romMax: number[]
     axisConfidence: number | undefined
   }
@@ -46,6 +80,23 @@
     }
   }
 
+  /** Pools raw frames across every bin from 0 to PRIOR_SOURCE_MAX_BIN (see that constant's own doc
+   * comment for why a single bin starved this in practice) and computes a real BetaRom directly from
+   * them, rather than trying to combine per-bin Welford accumulators. */
+  function romFromFrames(frames: Hand[], f: Finger, joint: 0 | 1 | 2, source: string) {
+    if (frames.length < 2) return undefined
+    const angles = frames.map((h) => signedJointAngle(h, f, joint))
+    const meanDeg = angles.reduce((a, b) => a + b, 0) / angles.length
+    const variance = angles.reduce((s, a) => s + (a - meanDeg) ** 2, 0) / (angles.length - 1)
+    return {
+      minDeg: Math.min(...angles),
+      maxDeg: Math.max(...angles),
+      meanDeg,
+      sdDeg: Math.max(Math.sqrt(variance), 0.1),
+      source,
+    }
+  }
+
   let video: HTMLVideoElement
   let overlayCanvas: HTMLCanvasElement
   let stream: MediaStream | undefined
@@ -56,16 +107,6 @@
   let handedness: Handedness = 'Right'
   let sessionDuration = 30
 
-  // One Euro / despike filter settings, live-tunable here for experimental tuning against real
-  // capture -- see landmarkFilter.ts's doc comments for what each one does and detector.ts for where
-  // they're applied (upstream of makeHand(), on both the 2D and 3D landmark sets). minCutoff/beta
-  // defaults are live-tuned (2026-09-04: 2 Hz / 0.1) and match landmarkFilter.ts's own; derivativeCutoff
-  // and maxGapSeconds are untouched from their original starting guesses.
-  let minCutoff = 2
-  let beta = 0.1
-  let derivativeCutoff = 1
-  let maxGapSeconds = 0.15
-
   let phase: Phase = 'idle'
   let error: Error | undefined
   let startTime = 0
@@ -75,6 +116,7 @@
   let loopTicks = 0
   let staleResetAttempted = false
   let totalAcceptedFrames = 0
+  let lastFragment: FlexionSweepFragment | undefined
 
   // Numeric displays (palm angle, thumb depth, confidence) and the tables below refresh at this rate
   // rather than every frame -- tied to the One Euro filter's own min cutoff so the on-screen numbers
@@ -82,7 +124,7 @@
   // it away as noise), instead of visually jittering at full frame rate. The underlying capture (which
   // frames land in which bin, ROM extrema) is unaffected -- every accepted frame is still counted;
   // only how often the page repaints numbers from that data is throttled.
-  $: displayRefreshIntervalSeconds = minCutoff > 0 ? 1 / minCutoff : 0.1
+  const displayRefreshIntervalSeconds = 1 / DEFAULT_ONE_EURO_OPTIONS.minCutoff
   let lastDisplayUpdate = 0
   let lastTableRefresh = 0
   let displayedScore: number | undefined
@@ -91,6 +133,15 @@
 
   let bins: Bin[] = Array.from({ length: BIN_COUNT }, (_, i) => makeBin(i))
   let dipPipFit: DipPipFit | undefined
+  // Every OTHER non-thumb finger's total flexion (sum of its 3 joints' signedJointAngle), one entry
+  // per accepted frame, in capture order -- NOT binned by palm angle like `bins` above, since
+  // fitEnslavingAll needs a real frame-to-frame time series to compute deltas from, and enslaving
+  // (unlike ROM) isn't an orientation-sensitive quantity capture-protocol.md ever asked to isolate by
+  // camera angle -- see its own "flexion-plane paired-finger exploration... in this same palm-facing
+  // orientation" note. Only populated for the four OTHER non-thumb fingers -- the active finger's own
+  // series is `activeFlexionHistory` below, and thumb is excluded (EnslavingPriors has no thumb slot).
+  let otherFlexionHistory: Partial<Record<NonThumbFinger, number[]>> = {}
+  let activeFlexionHistory: number[] = []
 
   interface ResidualBucket {
     pipLo: number
@@ -195,9 +246,14 @@
     lastTableRefresh = 0
     lastKeypoints = undefined
     staleResetAttempted = false
+    lastFragment = undefined
+    otherFlexionHistory = Object.fromEntries(
+      NON_THUMB_FINGERS.filter((f) => f !== finger).map((f) => [f, []])
+    )
+    activeFlexionHistory = []
     try {
       detector?.dispose()
-      detector = await createDetector(handedness, { minCutoff, beta, derivativeCutoff, maxGapSeconds })
+      detector = await createDetector(handedness)
       await setupCamera()
     } catch (e) {
       error = e as Error
@@ -208,6 +264,10 @@
     phase = 'recording'
     startTime = performance.now()
     rid = requestAnimationFrame(loop)
+  }
+
+  function totalFlexionDeg(hand: Hand, f: Finger): number {
+    return signedJointAngle(hand, f, 0) + signedJointAngle(hand, f, 1) + signedJointAngle(hand, f, 2)
   }
 
   function loop() {
@@ -269,6 +329,15 @@
           bins = bins
 
           totalAcceptedFrames++
+
+          // Enslaving history: unbinned, every accepted frame regardless of palm angle, only when the
+          // active finger is a non-thumb finger (EnslavingPriors has no thumb slot either way).
+          if (finger !== 'thumb') {
+            activeFlexionHistory = [...activeFlexionHistory, totalFlexionDeg(hand, finger)]
+            for (const f of Object.keys(otherFlexionHistory) as NonThumbFinger[]) {
+              otherFlexionHistory[f] = [...(otherFlexionHistory[f] ?? []), totalFlexionDeg(hand, f)]
+            }
+          }
         }
 
         // Tables refresh at the same throttled rate as the numeric displays above -- the underlying
@@ -290,6 +359,55 @@
       })
   }
 
+  /** Builds this sweep's contribution to `myHandPrior` and folds it in -- see myHandStore.ts's own
+   * doc comment for why this is a fuse, not an overwrite. Thumb sweeps produce nothing here (no
+   * `pipDipRom`/`dipPipCoupling`/`enslaving` destination field exists for the thumb yet -- the same
+   * schema gap `test-results.md`'s 2026-09-06 entry already identified). */
+  function buildFragment(): FlexionSweepFragment | undefined {
+    if (finger === 'thumb') return undefined
+    const romFrames = bins.slice(0, PRIOR_SOURCE_MAX_BIN + 1).flatMap((b) => b.history)
+    const sourceLabel = `${handedness}, live capture, 0-${
+      (PRIOR_SOURCE_MAX_BIN + 1) * BIN_WIDTH_DEG
+    }deg palm angle, n=${romFrames.length}`
+
+    const fragment: FlexionSweepFragment = { handedness, finger }
+    fragment.mcpFlexExt = romFromFrames(romFrames, finger, 0, sourceLabel)
+    fragment.pip = romFromFrames(romFrames, finger, 1, sourceLabel)
+    fragment.dip = romFromFrames(romFrames, finger, 2, sourceLabel)
+
+    const allFrames = bins.flatMap((b) => b.history)
+    if (allFrames.length >= 2) {
+      const fit = fitDipPipCoupling(allFrames, finger)
+      fragment.dipPipCoupling = {
+        mean: [fit.slope, fit.intercept],
+        covariance: fit.covariance,
+        source: sourceLabel,
+      }
+    }
+
+    if (activeFlexionHistory.length >= 3) {
+      const angles: Partial<Record<Finger, number[]>> = {
+        [finger]: activeFlexionHistory,
+        ...otherFlexionHistory,
+      }
+      try {
+        const fits = fitEnslavingAll(finger, angles)
+        const enslavingAgainst: FlexionSweepFragment['enslavingAgainst'] = {}
+        for (const [f, fit] of Object.entries(fits) as [
+          NonThumbFinger,
+          { coefficient: number; variance: number }
+        ][]) {
+          enslavingAgainst[f] = { coefficient: fit.coefficient, variance: fit.variance }
+        }
+        if (Object.keys(enslavingAgainst).length > 0) fragment.enslavingAgainst = enslavingAgainst
+      } catch {
+        // No i-dominant segment found this run -- fine, just contributes nothing to enslaving.
+      }
+    }
+
+    return fragment
+  }
+
   function stop() {
     if (phase === 'idle') return
     phase = 'idle'
@@ -297,6 +415,20 @@
     teardownCamera()
     refitAll()
     refitDipPip()
+
+    lastFragment = buildFragment()
+    if (lastFragment) mergeFlexionSweepFragment(lastFragment)
+  }
+
+  function downloadMyHandPrior() {
+    const text = serializeMyHandPriorModule($myHandPrior)
+    const blob = new Blob([text], { type: 'text/typescript' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'my-hand.ts'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   onDestroy(() => {
@@ -309,13 +441,15 @@
 <svelte:body class="bg-slate-900 text-gray-50" />
 
 <main class="max-w-3xl mx-auto my-8 px-4">
-  <h1 class="text-2xl font-semibold mb-4">Flexion Sweep: Axis-Fit vs. Palm Angle</h1>
+  <h1 class="text-2xl font-semibold mb-4">Flexion Sweep: Personal Prior Capture</h1>
   <p class="mb-6 text-sm text-gray-300">
     Start near palm-facing (0°) and slowly rotate toward the full lateral roll (~90°) over the course of
-    the recording, continuously flexing and extending the selected finger throughout. Frames are
-    automatically grouped into {BIN_WIDTH_DEG}° palm-angle bins live below — the goal is finding the
-    angle where axis-fit confidence and ROM stop looking trustworthy, not just comparing two fixed
-    endpoints.
+    the recording, continuously flexing and extending the selected finger throughout — but only the 0-{(PRIOR_SOURCE_MAX_BIN +
+      1) *
+      BIN_WIDTH_DEG}° (near-palm-facing) range feeds your saved prior below; the rest of the sweep is a
+    diagnostic (does confidence/ROM hold up as the angle changes), same as before. Every non-thumb
+    finger's flexion is tracked throughout, regardless of which one is "active," so a coupling and
+    enslaving fit come out of the same recording for free.
   </p>
 
   {#if error}
@@ -334,8 +468,9 @@
       </select>
       {#if finger === 'thumb'}
         <span class="text-xs text-amber-400">
-          Thumb tracking has a known systematic bias off palm-facing (see test_results.md, 2026-08-31) —
-          start with a non-thumb finger first if this is your first run.
+          Thumb tracking has a known systematic bias off palm-facing (see test_results.md, 2026-08-31),
+          and there's no HandPriorState field yet for its own MCP/IP or for thumb enslaving — this run's
+          tables below will still show, but nothing will be saved to "my hand."
         </span>
       {/if}
     </label>
@@ -358,67 +493,6 @@
         class="text-black rounded px-2 py-1"
       />
     </label>
-
-    <label class="flex flex-col gap-1">
-      <span class="text-sm">One Euro: min cutoff (Hz)</span>
-      <input
-        type="number"
-        min="0.01"
-        step="0.05"
-        bind:value={minCutoff}
-        disabled={phase !== 'idle'}
-        class="text-black rounded px-2 py-1"
-      />
-      <span class="text-xs text-gray-400">
-        Lower = heavier smoothing while nearly still. Scanning motion is slow, so this can be biased low.
-      </span>
-    </label>
-
-    <label class="flex flex-col gap-1">
-      <span class="text-sm">One Euro: beta</span>
-      <input
-        type="number"
-        min="0"
-        step="0.005"
-        bind:value={beta}
-        disabled={phase !== 'idle'}
-        class="text-black rounded px-2 py-1"
-      />
-      <span class="text-xs text-gray-400">
-        Higher = cutoff opens up more as speed increases (less lag on fast motion, less smoothing during
-        it).
-      </span>
-    </label>
-
-    <label class="flex flex-col gap-1">
-      <span class="text-sm">One Euro: derivative cutoff (Hz)</span>
-      <input
-        type="number"
-        min="0.01"
-        step="0.1"
-        bind:value={derivativeCutoff}
-        disabled={phase !== 'idle'}
-        class="text-black rounded px-2 py-1"
-      />
-      <span class="text-xs text-gray-400">Cutoff on the speed estimate itself. Rarely needs tuning.</span
-      >
-    </label>
-
-    <label class="flex flex-col gap-1">
-      <span class="text-sm">Gap reset (seconds)</span>
-      <input
-        type="number"
-        min="0.05"
-        step="0.05"
-        bind:value={maxGapSeconds}
-        disabled={phase !== 'idle'}
-        class="text-black rounded px-2 py-1"
-      />
-      <span class="text-xs text-gray-400">
-        A dropout longer than this resets despike/One-Euro state per landmark instead of filtering the
-        resumed signal against stale history.
-      </span>
-    </label>
   </div>
 
   <div class="mb-4 rounded overflow-hidden bg-black aspect-video relative">
@@ -430,7 +504,7 @@
     />
   </div>
 
-  <div class="mb-4">
+  <div class="mb-4 flex gap-2">
     {#if phase === 'idle'}
       <button
         class="bg-gradient-to-br from-purple-400 to-amber-600 text-lg p-1 rounded-2 shadow-lg"
@@ -466,9 +540,9 @@
       Current confidence: {displayedScore !== undefined ? displayedScore.toFixed(3) : '—'}
     </p>
     <p class="text-xs text-gray-400">
-      Numeric displays and tables refresh at ~{minCutoff.toFixed(2)} Hz ({displayRefreshIntervalSeconds.toFixed(
+      Numeric displays and tables refresh at ~{DEFAULT_ONE_EURO_OPTIONS.minCutoff.toFixed(2)} Hz ({displayRefreshIntervalSeconds.toFixed(
         2
-      )}s between updates) -- tied to the One Euro min cutoff above.
+      )}s between updates) -- tied to the One Euro filter's min cutoff.
     </p>
     {#if noHandDetected}
       <p class="text-amber-400 font-semibold">
@@ -498,8 +572,13 @@
           </thead>
           <tbody>
             {#each bins as bin}
-              <tr>
-                <td class="pr-4">{bin.index * BIN_WIDTH_DEG}-{(bin.index + 1) * BIN_WIDTH_DEG}°</td>
+              <tr class:text-emerald-400={bin.index <= PRIOR_SOURCE_MAX_BIN}>
+                <td class="pr-4"
+                  >{bin.index * BIN_WIDTH_DEG}-{(bin.index + 1) * BIN_WIDTH_DEG}°{bin.index <=
+                  PRIOR_SOURCE_MAX_BIN
+                    ? ' (saved)'
+                    : ''}</td
+                >
                 <td class="pr-4">{bin.acceptedFrames}</td>
                 <td class="pr-4"
                   >{bin.axisConfidence === undefined ? '—' : bin.axisConfidence.toFixed(2)}</td
@@ -559,6 +638,102 @@
     </div>
   {/if}
 
+  {#if lastFragment}
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold mb-2">Last sweep's contribution to "my hand"</h2>
+      <ul class="text-xs text-gray-300 list-disc list-inside space-y-1">
+        <li>
+          MCP flexExt: {lastFragment.mcpFlexExt
+            ? `mean ${lastFragment.mcpFlexExt.meanDeg.toFixed(
+                1
+              )}°, sd ${lastFragment.mcpFlexExt.sdDeg.toFixed(1)}°`
+            : 'not enough frames in the saved bin'}
+        </li>
+        <li>
+          PIP: {lastFragment.pip
+            ? `mean ${lastFragment.pip.meanDeg.toFixed(1)}°, sd ${lastFragment.pip.sdDeg.toFixed(1)}°`
+            : 'not enough frames in the saved bin'}
+        </li>
+        <li>
+          DIP: {lastFragment.dip
+            ? `mean ${lastFragment.dip.meanDeg.toFixed(1)}°, sd ${lastFragment.dip.sdDeg.toFixed(1)}°`
+            : 'not enough frames in the saved bin'}
+        </li>
+        <li>
+          DIP/PIP coupling: {lastFragment.dipPipCoupling
+            ? `slope ${lastFragment.dipPipCoupling.mean[0].toFixed(3)}`
+            : 'not fit'}
+        </li>
+        <li>
+          Enslaving (this finger active): {lastFragment.enslavingAgainst &&
+          Object.keys(lastFragment.enslavingAgainst).length > 0
+            ? Object.entries(lastFragment.enslavingAgainst)
+                .map(([f, fit]) => `${f}=${fit.coefficient.toFixed(3)}`)
+                .join(', ')
+            : 'no i-dominant segment found this run'}
+        </li>
+      </ul>
+    </div>
+  {/if}
+
+  <div class="mb-6 border-t border-gray-700 pt-4">
+    <h2 class="text-lg font-semibold mb-2">My hand (one source, both hands independent inside it)</h2>
+    <p class="text-xs text-gray-400 mb-2">
+      Persisted in this browser (localStorage) — survives a reload, cleared if you clear site data. Every
+      completed non-thumb sweep above fuses into ITS OWN hand's half, narrowing rather than overwriting
+      on a repeat — Right and Left are never pooled together automatically, since this project's own
+      capture data already found real per-hand differences (e.g. DIP/PIP coupling, test-results.md
+      2026-09-01). Appears as ONE checkable source in <code>multi-view</code> (matching every other source
+      there being a Right+Left pair) once you've swept at least one finger on either hand; fusing there fuses
+      the matching hand from every checked source together, never Right with Left.
+    </p>
+    <div class="grid grid-cols-2 gap-4">
+      {#each HANDEDNESSES as h}
+        <div>
+          <h3 class="text-sm font-semibold mb-1">{h}</h3>
+          <ul class="text-xs text-gray-300 list-disc list-inside space-y-1 mb-3">
+            {#each NON_THUMB_FINGERS as f}
+              <li>
+                {f}: pip {myHandByHandedness[h].pipDipRom?.pip?.[f] ? '✓' : '—'}, dip {myHandByHandedness[
+                  h
+                ].pipDipRom?.dip?.[f]
+                  ? '✓'
+                  : '—'}, mcp {myHandByHandedness[h].mcpAxes?.[f]?.flexExtRom ? '✓' : '—'}, coupling {myHandByHandedness[
+                  h
+                ].dipPipCoupling?.[f]
+                  ? '✓'
+                  : '—'}
+              </li>
+            {/each}
+            <li>
+              Enslaving matrix: {myHandByHandedness[h].enslaving?.coefficients
+                ? 'has some entries'
+                : 'not started'}
+            </li>
+          </ul>
+          <button
+            class="bg-red-900 px-3 py-1.5 rounded text-xs"
+            on:click={() =>
+              confirm(`Reset the accumulated ${h}-hand half? This cannot be undone.`) &&
+              resetMyHandPrior(h)}
+          >
+            Reset {h}
+          </button>
+        </div>
+      {/each}
+    </div>
+    <div class="mt-3">
+      <button class="bg-slate-700 px-4 py-2 rounded text-sm" on:click={downloadMyHandPrior}>
+        Download my-hand.ts (both hands)
+      </button>
+    </div>
+    <p class="text-xs text-gray-500 mt-2">
+      Downloading saves a file, not a repo commit — a browser page can't write into the repo directly.
+      Drop the downloaded file into <code>src/routes/scan3/lib/priors/fitted/</code>
+      and add one line to <code>registry.ts</code> (or hand it to Claude to do that step).
+    </p>
+  </div>
+
   <details class="text-xs text-gray-500 mt-6">
     <summary class="cursor-pointer select-none">Methodology notes</summary>
     <div class="mt-2 space-y-2">
@@ -569,7 +744,10 @@
         across bins if the flex/extend cycle is happening fast enough, relative to how slowly you're
         rotating, that each bin captures a comparable fraction of a cycle. A narrow bin with very few
         frames (check the Frames column) will have an unreliable confidence fit regardless of what the
-        number says.
+        number says. Only bins 0-{PRIOR_SOURCE_MAX_BIN} feed "my hand" below, for exactly this reason — pooled
+        together their ROM/mean/SD are a real, if noisy, near-palm-facing measurement; the other bins' numbers
+        are a diagnostic, not a candidate. (Widened from bin 0 alone after real capture showed a single 10°-wide
+        bin routinely getting too few frames to produce anything at all.)
       </p>
       <p>
         Palm angle is unsigned (0-180°) and can't by itself distinguish the two lateral roll directions —
@@ -577,6 +755,13 @@
         see docs/thumbs/test_results.md, 2026-08-31), so bins approaching 90° implicitly assume you're
         rolling that way. The live thumb-depth-sign readout is there to check you're rolling in the
         expected direction, not used to gate binning here.
+      </p>
+      <p>
+        Enslaving uses `fitEnslavingAll`'s own dominance filter (|Δactive| ≥ 3°, and ≥ 2x the other
+        finger's |Δ|) over the whole recording's frame-to-frame deltas, unbinned — the same method
+        `paired-sweep`'s abduction-plane capture already validated on real data, applied here to the
+        flexion-plane motion this page already produces, per capture-protocol.md's own "flexion-plane
+        paired-finger exploration... in this same palm-facing orientation" note.
       </p>
     </div>
   </details>

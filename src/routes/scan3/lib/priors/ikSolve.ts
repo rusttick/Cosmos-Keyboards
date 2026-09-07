@@ -123,22 +123,47 @@ function degreesFor(finger: Finger): (0 | 1 | 2 | 3)[] {
   return [0, 3, 1, 1]
 }
 
-/** Joint-0 splay shared by `buildDefaultSkeleton` and `buildRestExtensionSkeleton`: how much each
- * non-thumb finger's base fans out from a pure collinear reach, as a fraction of `KNUCKLE_FAN_DEG`,
- * and (via `THUMB_SPLAY_DEG` below) how far the thumb splays from that same row. A fixed display/model
- * convention with no anatomical citation behind it -- see `buildDefaultSkeleton`'s own doc comment for
- * why it exists and why it isn't itself a `HandPriorState` entry -- fanned symmetrically around the
- * middle finger (index +max, middle 0, ring -max/2, pinky -max). */
-const KNUCKLE_FAN_FRACTION: Record<NonThumbFinger, number> = {
-  indexFinger: 1,
-  middleFinger: 0,
-  ringFinger: -0.5,
-  pinky: -1,
+/** Joint-0 splay for the four non-thumb fingers, shared by `buildDefaultSkeleton` and
+ * `buildRestExtensionSkeleton`: how much each finger's base fans out from a pure collinear reach,
+ * relative to the middle finger (always 0, the reference). Derived geometrically (law of cosines) from
+ * two things `HandPriorState` actually models: each finger's own metacarpal length
+ * (`boneLengths.fingers[finger].mean[0] * handLength`) and the measured adjacent MCP-to-MCP spacing
+ * (`boneLengths.knuckleRow`) -- given two known side lengths of a triangle (the two fingers' wrist-to-
+ * MCP reaches) and the known third side (the measured gap between their MCPs), the angle between the
+ * two reaches is exactly recoverable, no assumption needed beyond "these three points form a
+ * triangle." Replaces an earlier version of this function that used a single fixed, uncited fan angle
+ * (`KNUCKLE_FAN_DEG = 10`) with no real length behind it at all -- back-computing what that angle
+ * implied for actual MCP spacing gave ~12/8/6mm for the three gaps, well under a real adult hand's
+ * ~15-20mm, confirmed directly once `/bones`' numbered-landmark view made the mismatch visible. Assumes
+ * the four MCPs lie close to one straight line (true near full extension, the pose this mostly matters
+ * for) so adjacent angles can simply be summed for a non-adjacent pair (e.g. index-to-ring) -- a
+ * reasonable approximation, not an exact geometric claim. */
+function knuckleRowSplayDeg(prior: HandPriorState): Record<NonThumbFinger, number> {
+  const handLength = prior.boneLengths.handLength.mean
+  const metacarpalMM = (f: NonThumbFinger) => prior.boneLengths.fingers[f].mean[0] * handLength
+  const gapMM = prior.boneLengths.knuckleRow.mean.map(ratio => ratio * handLength)
+
+  function angleBetween(l1: number, l2: number, gap: number): number {
+    if (l1 <= 0 || l2 <= 0) return 0
+    const cos = clampUnit((l1 ** 2 + l2 ** 2 - gap ** 2) / (2 * l1 * l2))
+    return (Math.acos(cos) * 180) / Math.PI
+  }
+
+  const indexMiddle = angleBetween(metacarpalMM('indexFinger'), metacarpalMM('middleFinger'), gapMM[0])
+  const middleRing = angleBetween(metacarpalMM('middleFinger'), metacarpalMM('ringFinger'), gapMM[1])
+  const ringPinky = angleBetween(metacarpalMM('ringFinger'), metacarpalMM('pinky'), gapMM[2])
+
+  return {
+    indexFinger: indexMiddle,
+    middleFinger: 0,
+    ringFinger: -middleRing,
+    pinky: -(middleRing + ringPinky),
+  }
 }
-const KNUCKLE_FAN_DEG = 10
+
 /** The thumb splays far more aggressively away from the finger row than any finger-to-finger gap --
- * same sign as `indexFinger`'s own `KNUCKLE_FAN_FRACTION` (both +1 in the base, unmirrored convention)
- * so the thumb lands on the index side, not the pinky side -- getting this wrong isn't just a cosmetic
+ * same sign as `knuckleRowSplayDeg`'s own `indexFinger` entry (both positive in the base, unmirrored
+ * convention) so the thumb lands on the index side, not the pinky side -- getting this wrong isn't just a cosmetic
  * mirroring bug, it's an anatomically impossible hand (thumb and pinky on the same side). A fixed,
  * clearly-thumb-shaped placeholder angle, not a fitted or cited one. */
 const THUMB_SPLAY_DEG = 45
@@ -163,10 +188,10 @@ const THUMB_SPLAY_DEG = 45
  * placeholder the way it is for every other joint; it's a structurally degenerate one that made every
  * corrected view built on this skeleton (multi-view's 8 side tiles, its center overlay) read as an
  * implausible, tearing-apart hand regardless of how good the rest of the model was (confirmed live,
- * 2026-09-06 -- see docs/thumbs/mv1.png). `KNUCKLE_FAN_DEG`/`THUMB_SPLAY_DEG` (module-level, shared
- * with `buildRestExtensionSkeleton`) fix that with the same eyeballed, uncited fan every real scan
- * will eventually replace with a fitted one -- an approximation chosen so downstream views are
- * legible, not a claim this project has measured anyone's actual knuckle spacing.
+ * 2026-09-06 -- see docs/thumbs/mv1.png). `knuckleRowSplayDeg`/`THUMB_SPLAY_DEG` (module-level, shared
+ * with `buildRestExtensionSkeleton`) fix that -- `knuckleRowSplayDeg` from a real measured span
+ * (`boneLengths.knuckleRow`, see its own doc comment) once one exists, `THUMB_SPLAY_DEG` still an
+ * eyeballed placeholder every real scan will eventually replace with a fitted one.
  *
  * `handedness` DOES matter here, despite `hand.limbs` already being run through `makeHand`'s own
  * chirality-reversal correction (`makeBasis`'s `reverse` parameter in `$lib/hand.ts`) -- an earlier
@@ -209,8 +234,9 @@ export function buildDefaultSkeleton(prior: HandPriorState, handedness: 'Left' |
       return [finger, joints]
     }),
   ) as Joints
+  const splayDeg = knuckleRowSplayDeg(prior)
   for (const f of nonThumb) {
-    const splay = new Matrix4().makeRotationY(KNUCKLE_FAN_FRACTION[f] * mirror * KNUCKLE_FAN_DEG * DEG2RAD)
+    const splay = new Matrix4().makeRotationY(splayDeg[f] * mirror * DEG2RAD)
     skeleton[f][0].Vinv.copy(splay)
     skeleton[f][0].V.copy(splay).invert()
   }
@@ -237,8 +263,8 @@ export function buildDefaultSkeleton(prior: HandPriorState, handedness: 'Left' |
  * confirmed 2026-09-06 below"; that one: "which sign makes a REAL tracked Left/Right hand's corrected
  * model come out right," confirmed separately and oppositely-signed, 2026-09-06, in its own doc
  * comment). Don't assume the two `mirror` formulas share a sign just because they share
- * `KNUCKLE_FAN_FRACTION`/`KNUCKLE_FAN_DEG`/`THUMB_SPLAY_DEG` -- they only share the fan's *shape* and
- * *magnitude*, calibrated once; each still picks its own sign against its own real-world check. */
+ * `knuckleRowSplayDeg`/`THUMB_SPLAY_DEG` -- they only share the fan's *shape* and *magnitude*,
+ * calibrated once; each still picks its own sign against its own real-world check. */
 export function buildRestExtensionSkeleton(prior: HandPriorState, handedness: 'Left' | 'Right'): Joints {
   const skeleton = buildDefaultSkeleton(prior)
   const nonThumb = FINGERS.filter((f): f is NonThumbFinger => f !== 'thumb')
@@ -247,8 +273,9 @@ export function buildRestExtensionSkeleton(prior: HandPriorState, handedness: 'L
   // hand's thumb reads on the RIGHT -- confirmed directly against the live center-tile video overlay,
   // 2026-09-06 (an earlier version of this had the two swapped).
   const mirror = handedness === 'Right' ? 1 : -1
+  const splayDeg = knuckleRowSplayDeg(prior)
   for (const f of nonThumb) {
-    const splay = new Matrix4().makeRotationY(KNUCKLE_FAN_FRACTION[f] * mirror * KNUCKLE_FAN_DEG * DEG2RAD)
+    const splay = new Matrix4().makeRotationY(splayDeg[f] * mirror * DEG2RAD)
     skeleton[f][0].Vinv.copy(splay)
     skeleton[f][0].V.copy(splay).invert()
   }

@@ -68,6 +68,14 @@ describe('HAND_PRIOR_SEED: Group A bone lengths', () => {
       expect(HAND_PRIOR_SEED.boneLengths.fingers[finger].segments.includes('wristToCmc')).toBe(finger === 'thumb')
     }
   })
+
+  test('knuckleRow: 3 positive adjacent-MCP gaps, symmetric PSD covariance', () => {
+    const row = HAND_PRIOR_SEED.boneLengths.knuckleRow
+    expect(row.mean.length).toBe(3)
+    for (const ratio of row.mean) expect(ratio).toBeGreaterThan(0)
+    expect(isSymmetric(row.covariance)).toBe(true)
+    expect(isPositiveSemiDefinite(row.covariance)).toBe(true)
+  })
 })
 
 function expectRomWithinItsOwnBounds(rom: BetaRom) {

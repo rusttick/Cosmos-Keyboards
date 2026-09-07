@@ -149,26 +149,44 @@ High confidence
 
 Medium confidence
 
-3. ROM mean/SD (the "typical posture" half of BetaRom). Straightforward angle recovery (no axis-calibration issue for hinge magnitude), but InterHand2.6M's frames come from
-   deliberately posed gestures (fist, star_trek, good_luck, fingerspread...), not passive natural behavior — so what comes out is "typical of the poses subjects were asked to
-   perform," a real improvement over an eyeballed placeholder, but not quite the same thing as "typical of ordinary use." Worth doing, with that caveat stated plainly in the
-   source string.
-4. DIP/PIP coupling. The biomechanical linkage is real and the angle recovery is calibration-free, but the data is a set of discrete named poses rather than a continuous
-   flexion sweep — the regression's range and density depend on how well those specific gestures happen to span the flexion range, which varies. Likely to produce something,
-   uncertain whether it produces a tight fit.
+3. [x] ROM mean/SD (the "typical posture" half of BetaRom) — done for PIP/DIP (the clean-hinge case) via
+       `fitRom.ts`, feeding `buildSubjectPrior.ts`. Caveat stated in the seed's `source` string as planned:
+       InterHand2.6M's frames come from deliberately posed gestures, not passive natural behavior, so this
+       is "typical of the poses subjects were asked to perform," not quite "typical of ordinary use."
+4. [x] DIP/PIP coupling — `fitDipPipCoupling.ts`, feeding `buildSubjectPrior.ts`'s `dipPipCoupling`.
+       Turned out to fit cleanly against subject 0: R² 0.62–0.81 across all four non-thumb fingers, slopes
+       0.40–0.55, none of the near-zero/negative-slope warning signs Stage 3b's own sanity check would have
+       flagged as a likely remap/sign bug. Better than the discrete-named-pose worry above suggested.
 
 Low confidence
 
-5. MCP ab/ad choke coefficient. Requires imposing an unverified axis convention (already flagged as a structural risk), plus needs a decent number of frames per flexion bin —
-   with a few hundred frames spread across 44 discrete poses per subject, bins may be sparse. Real chance the number reflects the assumed convention more than the joint.
-6. Enslaving-adjacent co-flexion correlation. Numerically computable, but likely a worse proxy than even ordinary passive data: named multi-finger gestures (five_count,
-   fingerspread) are voluntary, coordinated poses by construction, so whatever correlation comes out would be dominated by intentional co-contraction even more than an
-   unstructured natural-motion dataset would be. Technically producible, weak claim to being the target quantity.
+5. [x] MCP ab/ad choke coefficient — `fitMcpChoke.ts`, gated on Stage 3c's own qualitative
+       shrinkage-visible-before-fitting check (Pearson correlation between binned flexion and binned ab/ad
+       half-range must be ≤ -0.3). Real result, not forced: index/middle showed no visible shrinkage
+       (correlation slightly positive) and are honestly reported as `fitted: false`, un-included in
+       `buildSubjectPrior.ts`'s output; ring (-0.39, chokeCoeff 0.026) and pinky (-0.78, chokeCoeff 0.233,
+       a strikingly clean monotonic shrinkage) passed and are included, each with the axis-convention
+       caveat stated in its own `source` string. One real bug found and fixed along the way: the first
+       ab/ad-angle convention (`atan2(left, up)` against the palm frame) wrapped across ±180° once flexion
+       pushed the direction vector out of the up/left plane entirely, at exactly the high-flexion (fist-pose)
+       frames where this mattered most — replaced with `asin(dir · left)` (deviation from the sagittal
+       plane), which has no such blind spot at any flexion angle. Caught by checking the raw per-bin numbers
+       before trusting the fit, not by any test.
+6. [ ] Enslaving-adjacent co-flexion correlation. Not attempted this pass. Numerically computable, but
+       likely a worse proxy than even ordinary passive data: named multi-finger gestures (five_count,
+       fingerspread) are voluntary, coordinated poses by construction, so whatever correlation comes out
+       would be dominated by intentional co-contraction even more than an unstructured natural-motion
+       dataset would be. Technically producible, weak claim to being the target quantity.
 
 Not feasible from this data
 
 7. axialRotationWeight / true axial roll. Already established as structurally unrecoverable without an independently known bone-axis convention this dataset doesn't provide.
 8. Anything in wristForearm. No forearm or elbow ever appears in InterHand2.6M's captures. Zero chance regardless of method.
+
+Also identified, not yet attempted: the thumb's own MCP/IP hinges (clean-hinge, real candidate numbers
+already computed by `fitRom.ts` and printed by `subjectReport.ts`) have no field in `HandPriorState` at
+all to map onto — `cmcMobility.thumb` only covers the CMC (base) joint. Filling this in means extending
+`handModel.ts`'s schema first (e.g. a sibling `thumbMcpIpRom` group), not just writing another fitter.
 
 Smaller, lower-priority note from the same pass:
 

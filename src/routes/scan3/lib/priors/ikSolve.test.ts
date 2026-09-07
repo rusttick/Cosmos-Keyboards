@@ -207,11 +207,14 @@ describe('solvePose', () => {
   })
 
   test("an excluded finger's corrupted tracked reading never enters the objective, however wide its own prior", () => {
+    // Starting pose and corruption angle are fixed literals, deliberately NOT read from
+    // HAND_PRIOR_SEED (its meanDeg values are tuned constants that can legitimately change for
+    // unrelated reasons -- this test's own corruption-detection logic shouldn't be coupled to them).
     const pose = emptyPose()
     const meanDeg = HAND_PRIOR_SEED.pipDipRom.pip.middleFinger.meanDeg
-    pose.middleFinger[2] = { angleZ: meanDeg * DEG2RAD, angleY: 0 }
+    pose.middleFinger[2] = { angleZ: 0, angleY: 0 }
     const hand = frameFromPose(skeleton, pose)
-    hand.limbs.middleFinger[2] = hand.limbs.middleFinger[2].clone().applyAxisAngle({ x: 0, y: 0, z: 1 } as any, 60 * DEG2RAD)
+    hand.limbs.middleFinger[2] = hand.limbs.middleFinger[2].clone().applyAxisAngle({ x: 0, y: 0, z: 1 } as any, 90 * DEG2RAD)
 
     // Wide enough that, absent exclusion, this prior barely resists the corrupted reading at all.
     const wide = structuredClone(HAND_PRIOR_SEED)
@@ -540,5 +543,34 @@ describe('buildRestExtensionSkeleton', () => {
     // is on" is exactly the sign of the thumb tip's z coordinate.
     expect(Math.sign(rightVectors[4].z)).toBe(-Math.sign(leftVectors[4].z))
     expect(Math.sign(rightVectors[4].z)).not.toBe(0)
+  })
+
+  test('knuckleRow drives real MCP-to-MCP spacing (law of cosines), not a fixed fan angle', () => {
+    // Set an exact, easy-to-check spacing for each gap and confirm the rendered rest skeleton actually
+    // reproduces it -- the whole point of measuring a real span instead of assuming a fixed angle.
+    const prior = structuredClone(HAND_PRIOR_SEED)
+    const handLengthMM = prior.boneLengths.handLength.mean
+    const targetGapsMM = [18, 16, 14]
+    prior.boneLengths.knuckleRow.mean = targetGapsMM.map(mm => mm / handLengthMM)
+
+    const restSkeleton = buildRestExtensionSkeleton(prior, 'Right')
+    const restPose = buildRestExtensionPose(prior, 'Right')
+    const vectors = poseToLandmarkVectors(restSkeleton, restPose)
+    const UNITS_PER_MM = 100
+
+    expect(vectors[5].distanceTo(vectors[9]) / UNITS_PER_MM).toBeCloseTo(targetGapsMM[0], 5)
+    expect(vectors[9].distanceTo(vectors[13]) / UNITS_PER_MM).toBeCloseTo(targetGapsMM[1], 5)
+    expect(vectors[13].distanceTo(vectors[17]) / UNITS_PER_MM).toBeCloseTo(targetGapsMM[2], 5)
+  })
+
+  test('a wider knuckleRow measurement widens the rendered splay, all else equal', () => {
+    const narrow = structuredClone(HAND_PRIOR_SEED)
+    const wide = structuredClone(HAND_PRIOR_SEED)
+    wide.boneLengths.knuckleRow.mean = narrow.boneLengths.knuckleRow.mean.map(r => r * 2)
+
+    const narrowVectors = poseToLandmarkVectors(buildRestExtensionSkeleton(narrow, 'Right'), buildRestExtensionPose(narrow, 'Right'))
+    const wideVectors = poseToLandmarkVectors(buildRestExtensionSkeleton(wide, 'Right'), buildRestExtensionPose(wide, 'Right'))
+
+    expect(wideVectors[5].distanceTo(wideVectors[9])).toBeGreaterThan(narrowVectors[5].distanceTo(narrowVectors[9]))
   })
 })
