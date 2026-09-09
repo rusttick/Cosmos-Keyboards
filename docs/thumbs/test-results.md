@@ -1278,3 +1278,90 @@ two things at once" request comes up against `InstancedMesh`.
 - Only `indexFinger`/`middleFinger`/`ringFinger`/`pinky`/`thumb` for a single `'Right'` hand and the
   `[LITERATURE_SOURCE, INTERHAND_0_SOURCE]` fused prior were exercised this session -- `'Left'`
   handedness and other/future `PriorSource`s haven't been run through this viewer at all.
+
+---
+
+## 2026-09-08 -- `key-arrangement-in-3d.md` section 6 (forward-kinematic chain model) derived and verified against a real interactive 3D tool
+
+Continuing `key-arrangement-in-3d.md`'s single-row 2D work: this session named the vertex numbering
+(v1-v10) and the assembly-sequence cases (Flat, Socket-Corner Pivot, Wire-Corner Pivot for convex;
+Taper-Corner Pivot, Keycap-Corner Pivot for concave), derived a 2-layer forward-kinematic model (bone
+lengths/baseline angles from the key dimensions, joint angles as the free variables), and built
+`src/routes/scan-tests/key-arrangement/` to check all of it against a real 3D model instead of trusting
+the algebra alone -- reusing `capability-field`'s `Viewer.svelte`/`Grid`/`AxesHelper` setup as the
+template, per the user's own instruction to work from that page rather than starting a scene from
+scratch.
+
+### What got built, stage by stage
+
+- **Every closed-form derived this session was cross-checked in Python against a from-scratch,
+  direct step-by-step rotation before being trusted** -- `alpha_cvx` (coterminal-direction condition),
+  `alpha_ccv` (distance-equals-m condition, solved via the standard `E*cos+F*sin=G` closed form), and
+  both bone-chain formulas (convex sign=-1/clockwise, concave sign=+1/counter-clockwise) all matched
+  their direct-rotation counterparts to floating-point precision. This caught nothing by itself (see
+  the two bugs below, both found only once the 3D tool existed) but is the same "confirm live, don't
+  trust the derivation alone" discipline the rest of this doc keeps re-learning.
+- **Stage 0**: `KeyPrimitive.svelte` -- the keycap frustum (custom `BufferGeometry`, a square-footprint
+  truncated pyramid) on a switch-housing box, plus a separate wire-clearance box below the plate, at
+  the real dimensions (`B=18.2, w1=14, hf=9.5, hs=6.5, h1=16, w2=14, h2=10, m=0.5`, all mm). One key at
+  the origin, confirmed correct against the session's own diagrams before adding anything else.
+- **Stage 1**: a second key placed by `fk.ts`'s forward kinematics and dragged directly (constrained
+  to the X-Z plane via `TransformControls`' `showY={false}`), with the drag solved backward
+  (`fkSolve.ts`) onto the nearest valid pose.
+- **Stage 2**: generalized to an N-key chain (`chain.ts` composes each joint's local FK into one set of
+  global poses, the same way a robot arm's forward kinematics composes per-joint transforms) -- adding
+  a key is adding one entry to the joints array, nothing else changes.
+
+### Bugs found live, in the order they surfaced
+
+1. **The relaxed, independent-(phi1,phi2) model lets the keys separate well beyond the m gap.** Per an
+   explicit earlier request, `fk.ts` treats phi1 and phi2 as independent free variables (a genuine
+   2-DOF joint, a strictly larger reachable region than the original coupled construction). But most of
+   that region does not keep the keys adjacent: allowing phi2 to be nonzero before phi1 has reached its
+   own natural contact angle (`alpha`) means bone 2 is pivoting about a point that isn't actually in
+   contact with the neighboring key yet, which just moves the keys apart -- confirmed live by dragging,
+   not predicted in advance. Fixed by restricting the interactive drag (`fkSolve.ts`) to the original
+   single-parameter coupled curve (`phi1 = min(theta, alpha)`, `phi2 = max(theta - alpha, 0)`), which
+   keeps the keys adjacent throughout by construction. `fk.ts`'s independent-DOF version is kept as-is --
+   still the right object for the configuration-space/workspace framing discussed for next session --
+   the interactive drag just doesn't explore it directly anymore.
+2. **Key 2's rotations weren't happening around the points the diagrams showed.** All the FK math
+   above was independently validated and correct; the bug was entirely in the 3D primitive:
+   `KeyPrimitive.svelte`'s meshes were built symmetric about their own local origin (a natural way to
+   describe a frustum/box), but `fk.ts`'s convention places a key's origin at **point 1** (the plate
+   corner facing the neighbor). So the component's `T.Group` was rotating about the key's visual
+   center, offset by `B/2` from where the model actually pivots. Fixed by wrapping the meshes in an
+   inner group offset by `(B/2, 0, 0)`, so the outer group's origin -- where `position`/`rotation` are
+   actually applied -- lines up with point 1.
+
+### Lessons learned
+
+**Correct math and a correct-looking render can both be true and still not agree with each other, if
+the two disagree about what a shared coordinate origin means.** Bug 2 above is the sharpest version of
+this doc's recurring "sign/orientation conventions need live verification" lesson yet: nothing was
+computed wrong, the derivation was verified independently in Python before it ever touched Threlte --
+the bug was purely that the 3D primitive's implicit origin convention (its own visual center) didn't
+match the math's explicit one (point 1). A visualization catches this class of bug precisely because it
+makes "where does this actually rotate around" checkable at a glance, the same way the capability-field
+session above found bugs by checking whether two independently-correct things agreed.
+
+**Relaxing a coupled degree of freedom into two independent ones changes what the model's reachable
+region _means_, not just its size.** The coupled construction's pivot-switching rule (walk from point 1
+to point 10, but only once point 1's own rotation is exhausted) was implicitly also what kept the keys
+adjacent. Deliberately relaxing that coupling (to explore the fuller design space, per an explicit
+request) produces a real, larger, still well-defined 2D patch of reachable poses -- but "reachable" and
+"keeps the keys touching" turned out not to be the same set, and only mattered once someone tried to
+drag through the difference.
+
+### Still open
+
+- Everything above is the 2D single-row case only -- no second (tenting/splay) joint axis, no 3D
+  generalization, matching what `key-arrangement-in-3d.md` itself still lists as unsolved.
+- The actual next step, agreed with the user: combining this key-surface-space model with
+  `keypress-vector-problems.md`'s finger-movement-space work. `key-arrangement-in-3d.md` section 6.6
+  now names one candidate route (joint-angle space as a configuration space, forward kinematics mapping
+  it to a workspace, a per-key press-direction constraint possibly carving that space into a convex
+  polytope if it turns out to be ~linear in cumulative bend angle) but resolving whether that linearity
+  holds, and what a "valid press direction" constraint should even measure, depends on
+  `keypress-vector-problems.md`'s own unresolved threads (particularly #1, #4, #9) -- not decided or
+  started this session.

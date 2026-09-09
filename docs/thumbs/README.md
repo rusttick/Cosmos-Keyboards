@@ -50,6 +50,11 @@ see **`TODO.md`** for status.
   (kinematic Jacobian vs. geometric contact-sphere), contact-point geometry with no ground truth, and
   several other open threads, named so they aren't accidentally resolved by omission.
 
+- **`key-arrangement-in-3d.md`** — the sibling packing-geometry question: given two keys' known shapes,
+  positions, and orientations, when do they not collide, without ever animating keycap travel or running
+  a mesh intersection check. Solves the 2D single-chain case (a minimum bend-radius formula) in full;
+  frames the open 3D generalization and the general key-adjacency taxonomy as unsolved.
+
 ## Validation — empirical grounding
 
 - **`test-plan.md`** — the sequence of small tests validating `capture-protocol.md`'s assumptions
