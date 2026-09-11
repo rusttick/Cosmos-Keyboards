@@ -11,7 +11,7 @@
  */
 
 import type { BendDirection } from './fk'
-import { coupledPose } from './fkSolve'
+import { coupledPose, offsetPose, type Point2 } from './fkSolve'
 
 export interface JointState {
   direction: BendDirection
@@ -26,7 +26,7 @@ export interface GlobalPose {
 
 const ORIGIN: GlobalPose = { x: 0, z: 0, angle: 0 }
 
-function composeLocal(parent: GlobalPose, local: { x: number; z: number; angle: number }): GlobalPose {
+export function composeLocal(parent: GlobalPose, local: { x: number; z: number; angle: number }): GlobalPose {
   const cos = Math.cos(parent.angle)
   const sin = Math.sin(parent.angle)
   return {
@@ -57,4 +57,16 @@ export function worldToLocal(parent: GlobalPose, world: { x: number; z: number }
   const cos = Math.cos(parent.angle)
   const sin = Math.sin(parent.angle)
   return { x: cos * dx + sin * dz, z: -sin * dx + cos * dz }
+}
+
+/** Global position of a marker rigidly attached to each key at local `offset` (e.g. a keycap's
+ * top center) -- one entry per joint (handlePoses[i] belongs to key i+1, placed by joints[i]).
+ * Pair with fkSolve.ts's `solveTowardTarget(target, offset)` using the SAME offset, so dragging
+ * this marker solves for the theta that puts the marker (not the pivot) under the cursor. */
+export function chainHandlePoses(joints: JointState[], offset: Point2): Point2[] {
+  const keyPoses = chainPoses(joints)
+  return joints.map((joint, i) => {
+    const local = offsetPose(joint.direction, joint.theta, offset)
+    return composeLocal(keyPoses[i], { x: local.x, z: local.z, angle: 0 })
+  })
 }

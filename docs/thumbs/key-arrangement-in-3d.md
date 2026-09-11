@@ -4,6 +4,9 @@
 > an interactive 3D prototype at `/scan-tests/key-arrangement` (drag either joint; it stays
 > mechanically constrained to the curves §6.2 names, in both bend directions). 3D generalization and
 > the general adjacency taxonomy are still open. Depends on: `representing-keyboard-build-inputs.md`.
+> **Succeeded by `capability-packing.md`**, which reuses this doc's key-shape geometry (§6.1) but
+> replaces the chain/pivot approach with a convex-overlap (SAT) test once placement has to answer to a
+> real, per-finger capability field rather than a hand-independent chain — see that doc's §3 for why.
 > Sibling to `keypress-vector-problems.md` (that doc asks "which direction can a key be pressed at a
 > reachable point"; this doc asks "given two keys' shapes, positions, and orientations, when do they
 > not collide" — a pure packing-geometry question, independent of hand kinematics). **Next step,

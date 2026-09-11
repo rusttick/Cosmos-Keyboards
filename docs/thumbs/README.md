@@ -53,7 +53,14 @@ see **`TODO.md`** for status.
 - **`key-arrangement-in-3d.md`** — the sibling packing-geometry question: given two keys' known shapes,
   positions, and orientations, when do they not collide, without ever animating keycap travel or running
   a mesh intersection check. Solves the 2D single-chain case (a minimum bend-radius formula) in full;
-  frames the open 3D generalization and the general key-adjacency taxonomy as unsolved.
+  frames the open 3D generalization and the general key-adjacency taxonomy as unsolved. Succeeded by
+  `capability-packing.md` for the actual placement algorithm.
+
+- **`capability-packing.md`** — where `key-point-selection.md`'s capability field and
+  `key-arrangement-in-3d.md`'s key-shape geometry meet: reviews the capability field as actually
+  implemented (`scan-tests/capability-field/`, and where it's drifted from spec), then specifies a
+  convex-overlap (SAT) placement algorithm, in joint-angle space, that replaces the chain/pivot approach.
+  Not yet implemented.
 
 ## Validation — empirical grounding
 

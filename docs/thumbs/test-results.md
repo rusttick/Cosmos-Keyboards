@@ -1365,3 +1365,170 @@ drag through the difference.
   holds, and what a "valid press direction" constraint should even measure, depends on
   `keypress-vector-problems.md`'s own unresolved threads (particularly #1, #4, #9) -- not decided or
   started this session.
+
+---
+
+## 2026-09-10 -- `/scan-tests/key-arrangement` extended to a second chain and a top-center drag handle
+
+Two small follow-ups to the interactive tool from the 2026-09-08 session, both requested and
+verified live rather than planned in advance.
+
+**A second, independent chain grows key 0 in the -x direction** (`leftJoints`, 3 keys, alongside
+the original `rightJoints`), reusing fk.ts/chain.ts's unmirrored (+x-only) machinery unchanged and
+reflecting it for display via a Three.js `<T.Group position={[B,0,0]} scale={[-1,1,1]}>` wrapper.
+First attempt mirrored about x=0 (key 0's own v1) and left a full B+m gap instead of m -- key 0's
+real body spans [0,B], not [-B,0], so the mirror axis has to be key 0's own center (x=B/2), the
+only line its real span reflects back onto itself across. Caught by the user reporting "the 3 new
+keys ... do not touch the existing fixed/center key" before it was otherwise noticed; also
+confirmed algebraically that mirroring a rotated rigid body isn't expressible as any single
+rotation angle, ruling out an earlier scalar `-sign*angle` trick as fixable by sign alone. Both the
+correct axis and the ruled-out alternative are locked in as regression tests
+(`leftChainMirror.test.ts`).
+
+**The drag handle moved from the FK-tracked pivot (v1, a plate corner) to the keycap's top
+center.** Required generalizing the solve itself, not just where the gizmo renders: `fkSolve.ts`'s
+`solveTowardTarget`/`bestThetaOnCurve` now take an optional `offset`, minimizing distance from a
+point rigidly rotated along with the curve's own pose (`offsetPose`) instead of the raw pivot;
+`chain.ts`'s `chainHandlePoses` composes that per-joint offset point through the same ancestor
+chain `chainPoses` uses. A useful side effect, caught while writing the offset tests: the earlier
+"phi2=0 regime is position-degenerate" finding (this same tool's own `fkSolve.test.ts`, added when
+its regression tests were first written) is specific to the zero-offset pivot -- a nonzero offset
+traces a real arc there since only orientation (not pivot position) changes, so the
+degenerate-regime solve failure that motivated the original theta-must-be-past-phi1Max test caveat
+doesn't apply once a handle offset is in play.
+
+### Still open
+
+- Neither change was checked in-browser by the agent (no browser tool available this session) --
+  both were verified via targeted scratch scripts reproducing the exact Three.js transform
+  composition, then confirmed correct by the user after reload.
+
+---
+
+## 2026-09-10 -- `capability-packing.md` written; first working 2D packing prototype built, then hardened against three real bugs the user caught live
+
+A new doc, `docs/thumbs/capability-packing.md`, succeeds `key-arrangement-in-3d.md`: where the two sources
+this project's whole packing effort needs (`key-point-selection.md`'s per-finger capability field, and the
+key-shape packing geometry) actually meet. Reviewed the capability field as _actually implemented_
+(`scan-tests/capability-field`) against spec and found real drift worth recording there (grid-sampled not
+posterior-sampled, fixed not optimized landmark-0, and -- the load-bearing one -- no orientation per sample
+anywhere, despite `key-point-selection.md`'s spec calling for one via the Jacobian's SVD). The new doc's
+recommended algorithm: represent each key as its existing convex-piece decomposition, test pairwise overlap
+via the separating axis theorem (SAT) rather than re-deriving pivot cases by hand for every new degree of
+freedom (the reason `key-arrangement-in-3d.md`'s chain/pivot approach kept "missing DOF"), and correct
+overlap by mapping SAT's minimum translation vector through the finger's own Jacobian pseudoinverse so a
+key's orientation is always a legitimate, finger-derived pose -- never independently adjusted to escape a
+conflict.
+
+### Built: a 2D square-packing testbed, staged simpler-first
+
+Rather than start on the real hand-driven capability field, built the doc's own recommended first
+increment: `scan-tests/capability-packing` (squares instead of the real two-piece key shape, a synthetic
+scalar field instead of the real capability field), backed by tested modules under
+`src/routes/scan3/lib/packing/` (`sat2d.ts`, `linearField.ts`, `radialField.ts`, `clusterInit.ts`,
+`greedyInit.ts`, `relax.ts`, `diagnostics.ts`). Added `d3-delaunay` as a real dependency for the diagnostics'
+neighbor-finding (Delaunay triangulation, Voronoi cells) -- a deliberate, explicit override of this
+project's usual anti-dependency default, on the reasoning that hand-rolling 2D computational geometry is
+real, error-prone work a well-tested library already solves.
+
+**Diagnostics**, per the doc's own "Diagnosing accidental crystallization" section, all implemented and
+unit-tested against synthetic data before touching the live prototype: the bond-orientational order
+parameter psi6 (Halperin-Nelson/Steinhardt, verified exactly 1 on a synthetic hex lattice's interior points,
+markedly lower on a random scatter), the radial distribution function g(r), the structure factor S(k),
+Voronoi cell side counts, and a Delaunay-neighbor-based coordination number.
+
+### Three real bugs caught live by the user, each fixed and written back into the doc
+
+1. **A uniform gradient on a symmetric starting cluster is a rigid translation, not a meaningful thing to
+   click through.** Stage 1 as originally spec'd (constant `direction`, squares seeded via `key-point- selection.md`'s own Step 3-4 greedy procedure) turned out doubly degenerate: greedy selection already
+   fully resolves the packing during initialization (never accepts a conflicting candidate, so a relaxation
+   loop has nothing left to do), and separately, every square under a truly constant direction feels the
+   identical pull, so a perfectly regular seed has no internal asymmetry for that force to act on. Confirmed
+   directly (identical diagnostics after 20 iterations; per-square displacements identical to 5 decimal
+   places). Fixed by switching the default field to **radial** (a center point, off-center from the seed's
+   own centroid on purpose) and the starting condition to a heavily-overlapping **tight cluster**
+   (`clusterInit.ts`) instead of a pre-resolved greedy placement.
+
+2. **"No rotation DOF yet" silently answered "how should a square be oriented" by fiat, not by finding.**
+   With squares locked to `theta=0`, the first overlap-free state necessarily showed zero rotation --
+   not because that was discovered to be right, just because it was the only option on offer. Fixed by
+   giving each square a `theta`, set directly from the local field direction every relaxation sweep (one of
+   the square's two axes points along the local gradient) and never touched by the overlap-correction step
+   -- the same "orientation is derived, never used to escape a conflict" principle the real algorithm's
+   Jacobian-based correction uses. Overlap became a proper oriented-box (OBB) SAT test (4 candidate axes)
+   instead of plain axis-aligned overlap, since squares can no longer be assumed unrotated.
+
+3. **A single correction pass per "Step" click was not strict enough -- real, visible overlap got through,
+   per the user's own live report.** Root cause: correcting square `i` against `j` can reintroduce an
+   overlap with some earlier `k` a prior correction in the _same_ pass had already cleared, and a single
+   pass never re-checks `k` afterward. Fixed by repeating full Gauss-Seidel passes within one `relaxStep`
+   call until a pass resolves nothing (or a generous pass cap is hit) -- the standard fix in iterative
+   contact solvers, which run several solver iterations per step for exactly this reason. Getting this
+   fully strict surfaced two further numerical issues, found only by actually trying to drive the residual
+   to zero rather than assuming more passes alone would do it: clamping a square to the domain boundary
+   _after each individual pairwise correction_ (rather than once per square per pass) was fighting the next
+   neighbor correction and was a real, independent source of non-convergence; and applying the full-strength
+   MTV every single pass could settle into an exact, persistent back-and-forth cycle in a symmetric
+   multi-body jam (confirmed live via a debug script logging max-overlap per step -- it stabilized at one
+   exact floating-point value across 19 further move+correct cycles, proving a genuine fixed point, not slow
+   decay). Fixed by under-correcting (0.5 damping factor on the MTV per pass) -- the standard fix for
+   oscillation in iterative contact solvers, which still converges (every pass still reduces overlap
+   whenever one exists) without the exact cancellation a full-strength correction can fall into. A related,
+   separate finding along the way: biasing the pushed-apart distance by a small epsilon (`overlap + epsilon`
+   instead of exactly `overlap`) -- initially added as the seemingly-obvious "push past exactly zero" fix
+   for floating-point noise -- actually made things worse: with many squares in simultaneous contact, each
+   pair's own epsilon bias compounds, and the whole system converges to a _persistent_ residual proportional
+   to epsilon instead of to zero. Removing the bias (using epsilon only as the "close enough to zero"
+   cutoff, never added to the actual push) fixed it.
+
+### Spacing added as a parameter of the overlap test, not a bigger collision shape
+
+Once "how do I require a minimum gap, not just non-overlap" came up, inflating the squares themselves was
+the tempting answer but the wrong one to generalize: it works for an isotropic square, but the real key
+shape (`key-arrangement-in-3d.md`'s two-piece frustum/box) is anisotropic, so a uniform inflation would need
+a true Minkowski-sum-with-a-disk offset (rounding every corner by the gap radius) to stay geometrically
+honest, and would distort the taper if done naively. Instead, `overlapObb` gained a `minGap` parameter
+folded directly into the SAT projections it already computes (`overlap = rA + rB + minGap - |d|`), matching
+`key-arrangement-in-3d.md`'s own `m` notation for this exact quantity -- no shape changes needed, and it
+generalizes to any convex shape pair, square or two-piece key alike. `coordinationNumbers` needed a matching
+update: once `minGap` is nonzero, a settled, non-contending pair sits at `minGap`, not zero, so "touching"
+now means `obbGap(...) - minGap` within tolerance, not `obbGap(...)` itself. Verified with tests confirming a
+settled pack sits at (not below) the requested gap, and that a larger `minGap` measurably loosens the pack
+relative to `minGap=0`.
+
+### Verification
+
+35 tests added under `src/routes/scan3/lib/packing/` (398 passing repo-wide), `npm run check` clean
+throughout. The prototype itself was driven headlessly via Playwright/`chromium-cli`-style scripting for
+two rounds of live verification (screenshots, console-error checks, panel-value reads before/after
+clicking "Step") before the user asked not to use the live browser check further this session and took over
+running it themselves directly -- their own live runs are what caught bugs 1 and 3 above; bug 2 and the
+minGap-vs-shape-inflation design question were raised by the user directly, ahead of any prototype run.
+
+### Still open
+
+- **The g(r)/S(k) global-density-normalization mismatch is now live, not hypothetical.** The doc's own
+  "Diagnosing accidental crystallization" caveat -- that g(r) and S(k) assume statistically uniform density
+  -- was written anticipating the spherical/radial field stage; that field is the prototype's _default_ now,
+  and it deliberately produces non-uniform density (squares pile up near the center by design).
+  `radialDistribution`'s single global `rho = N / domainArea` is likely misreading the expected radial
+  density gradient as spurious structure. psi6/coordination/Voronoi (purely local, neighbor-based) are the
+  trustworthy signals meanwhile; g(r)/S(k) need either a locally-referenced version or to be explicitly
+  demoted to "secondary, known-biased" in the UI.
+- **No packing-efficiency (coverage) metric exists.** Every diagnostic built so far measures order, not
+  density -- a valid, non-overlapping, nicely disordered but very loosely packed arrangement would not be
+  flagged as a problem by anything currently in the panel. A simple total-square-area over convex-hull-area
+  (or over occupied bounding region) number is cheap to add and currently missing.
+- **This session's "looking good" is a single anecdotal run, not a recorded sweep.** Unlike the rest of this
+  doc's convention, no systematic sweep over `minGap`, square count, or center offset has been run and
+  logged with resulting psi6/coordination/coverage numbers -- worth doing before treating the current
+  defaults as validated rather than just plausible.
+- **Untested at larger N.** Tests top out at 30 squares; whether multi-pass correction still converges
+  (and stays interactively fast) at something closer to a real keyboard's key count (60-100) is unconfirmed.
+- **Two of the doc's staged fields haven't been tried at all**: the sine-wave field (commensurate/
+  incommensurate lock-in against an external period, per the Frenkel-Kontorova framing) and the hard
+  discontinuity (a field whose direction flips sharply across a boundary -- plausibly a new failure mode,
+  a square straddling the seam oscillating rather than settling, that nothing built so far has been
+  stress-tested against).
+- **`minGap` and rotation haven't been tested together.** The `minGap` tests added this session all use
+  axis-aligned (`theta=0`) pairs; no test confirms the two features compose correctly for rotated squares.
